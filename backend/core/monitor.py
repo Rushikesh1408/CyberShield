@@ -24,6 +24,9 @@ class MonitorEvent:
 
 
 class RealTimeMonitor:
+    _ACTIVITY_COUNT_WINDOW_SECONDS = 5.0
+    _ACTIVITY_RATE_WINDOW_SECONDS = 1.0
+
     def __init__(
         self,
         *,
@@ -104,7 +107,7 @@ class RealTimeMonitor:
     def snapshot(self) -> dict[str, Any]:
         now = time.time()
         with self._lock:
-            while self._event_times and self._event_times[0] < now - 1.0:
+            while self._event_times and self._event_times[0] < now - self._ACTIVITY_COUNT_WINDOW_SECONDS:
                 self._event_times.popleft()
 
             recent_events = [
@@ -115,16 +118,20 @@ class RealTimeMonitor:
                 }
                 for event in self._recent_events
             ]
-            event_rate = float(len(self._event_times))
-            event_counter = self._event_counter
+            activity_count = int(len(self._event_times))
+            event_rate = float(
+                sum(1 for event_time in self._event_times if event_time >= now - self._ACTIVITY_RATE_WINDOW_SECONDS)
+            )
+            event_counter = int(self._event_counter)
             cpu_usage = round(self._last_cpu, 2)
             active_processes = self._active_processes
 
         return {
             "watch_paths": [str(path) for path in self.watch_paths],
             "is_running": self.is_running,
-            "file_activity_count": event_counter,
+            "file_activity_count": activity_count,
             "file_activity_rate": event_rate,
+            "file_activity_total": event_counter,
             "cpu_usage": cpu_usage,
             "active_processes": active_processes,
             "events": recent_events,
@@ -184,6 +191,19 @@ class _WatchHandler(FileSystemEventHandler):
     def on_deleted(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
             self.monitor.record_event(action="deleted", path=event.src_path)
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
+            return
+
+        src_path = str(getattr(event, "src_path", "") or "").strip()
+        dest_path = str(getattr(event, "dest_path", "") or "").strip()
+
+        # Treat move/rename as delete+create so threat activity reflects encrypted-name churn.
+        if src_path:
+            self.monitor.record_event(action="deleted", path=src_path)
+        if dest_path:
+            self.monitor.record_event(action="created", path=dest_path)
 
 
 def default_monitor_paths() -> list[Path]:

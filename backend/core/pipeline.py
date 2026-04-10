@@ -216,6 +216,133 @@ class CyberShieldPipeline:
     def run_cycle(self) -> dict[str, Any]:
         return self.assess_threat(respond=True)
 
+    def recent_activity_paths(
+        self,
+        *,
+        lookback_seconds: float = 45.0,
+        limit: int = 120,
+    ) -> list[str]:
+        monitor_snapshot = self.monitor.snapshot()
+        events = monitor_snapshot.get("events") if isinstance(monitor_snapshot.get("events"), list) else []
+
+        now = time.time()
+        lower_bound = now - max(1.0, float(lookback_seconds))
+        max_items = max(1, int(limit))
+
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for event in reversed(events):
+            if not isinstance(event, dict):
+                continue
+
+            event_timestamp = float(event.get("timestamp") or 0.0)
+            if event_timestamp < lower_bound:
+                continue
+
+            action = str(event.get("action") or "").lower()
+            if action not in {"created", "modified", "deleted"}:
+                continue
+
+            file_path = str(event.get("file") or "").strip()
+            if not file_path:
+                continue
+
+            resolved = str(Path(file_path).resolve())
+            key = resolved.lower()
+            if key in seen:
+                continue
+
+            seen.add(key)
+            candidates.append(resolved)
+            if len(candidates) >= max_items:
+                break
+
+        return candidates
+
+    def automatic_restore(
+        self,
+        *,
+        before_timestamp: float | None = None,
+        lookback_seconds: float = 45.0,
+        limit: int = 120,
+    ) -> list[str]:
+        def normalize_restore_targets(paths: list[str]) -> list[str]:
+            targets: list[str] = []
+            seen: set[str] = set()
+
+            for value in paths:
+                candidate = str(value).strip()
+                if not candidate:
+                    continue
+
+                resolved = Path(candidate).resolve()
+                key = str(resolved).lower()
+                if key not in seen:
+                    seen.add(key)
+                    targets.append(str(resolved))
+
+                if not resolved.name.lower().endswith(".enc"):
+                    continue
+
+                original_name = resolved.name[:-4]
+                if not original_name:
+                    continue
+
+                original_path = resolved.with_name(original_name).resolve()
+                original_key = str(original_path).lower()
+                if original_key in seen:
+                    continue
+
+                seen.add(original_key)
+                targets.append(str(original_path))
+
+            return targets
+
+        restore_target_timestamp = float(before_timestamp) if before_timestamp is not None else None
+
+        candidates = self.recent_activity_paths(
+            lookback_seconds=lookback_seconds,
+            limit=limit,
+        )
+
+        if not candidates:
+            backup_state = self.snapshot_manager.status()
+            recent_files_value = backup_state.get("recent_files")
+            recent_files = recent_files_value if isinstance(recent_files_value, list) else []
+            candidates = [
+                str(path)
+                for path in recent_files
+                if isinstance(path, str) and path.strip()
+            ][: max(1, int(limit))]
+
+        if not candidates:
+            return []
+
+        restore_targets = normalize_restore_targets(candidates)
+        if not restore_targets:
+            return []
+
+        restored_paths = self.restore_many(restore_targets, before_timestamp=restore_target_timestamp)
+        restored_set = {str(Path(path).resolve()).lower() for path in restored_paths}
+
+        # Remove encrypted artifacts once the matching original file has been restored.
+        for target in restore_targets:
+            target_path = Path(target).resolve()
+            if not target_path.name.lower().endswith(".enc"):
+                continue
+
+            original_path = target_path.with_name(target_path.name[:-4]).resolve()
+            if str(original_path).lower() not in restored_set:
+                continue
+
+            try:
+                if target_path.exists() and target_path.is_file():
+                    target_path.unlink()
+            except OSError:
+                continue
+
+        return restored_paths
+
     def _score_from_snapshot(self, monitor_snapshot: dict[str, Any]) -> dict[str, int | str]:
         with self._lock:
             dna_mismatch_count = self._dna_mismatch_count

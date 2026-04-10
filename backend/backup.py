@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Iterable
 
 
+_VERSION_SUFFIX_PATTERN = re.compile(r"_v(\d+)$")
+DEFAULT_MAX_BACKUPS_PER_FILE = 5
+
+
 @dataclass(frozen=True)
 class BackupResult:
     source_path: str
@@ -23,6 +27,7 @@ class BackupManager:
         self,
         source_roots: Iterable[str | Path],
         backup_root: str | Path,
+        max_backups_per_file: int = DEFAULT_MAX_BACKUPS_PER_FILE,
     ) -> None:
         normalized_roots = [Path(path).resolve() for path in source_roots]
         unique_roots: list[Path] = []
@@ -38,6 +43,7 @@ class BackupManager:
         self.source_roots = unique_roots
         self.backup_root = Path(backup_root).resolve()
         self.backup_root.mkdir(parents=True, exist_ok=True)
+        self.max_backups_per_file = max(1, int(max_backups_per_file))
         self._lock = threading.Lock()
         self._hash_cache: dict[str, str] = {}
         self._root_labels = self._build_root_labels(self.source_roots)
@@ -109,6 +115,37 @@ class BackupManager:
     def _remove_version_suffix(file_name_stem: str) -> str:
         return re.sub(r"_v\d+$", "", file_name_stem)
 
+    @staticmethod
+    def _extract_version_number(path: Path) -> int:
+        match = _VERSION_SUFFIX_PATTERN.search(path.stem)
+        if match is None:
+            return 0
+
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return 0
+
+    def _next_version_number(self, versions: list[Path]) -> int:
+        if not versions:
+            return 1
+        return max(self._extract_version_number(path) for path in versions) + 1
+
+    def _prune_versions_to_limit(self, versions: list[Path]) -> int:
+        overflow = len(versions) - self.max_backups_per_file + 1
+        if overflow <= 0:
+            return 0
+
+        removed = 0
+        by_oldest = sorted(versions, key=lambda path: path.stat().st_mtime)
+        for stale_version in by_oldest[:overflow]:
+            try:
+                stale_version.unlink()
+                removed += 1
+            except OSError:
+                continue
+        return removed
+
     def _source_path_from_backup(self, backup_path: Path) -> Path | None:
         try:
             relative = backup_path.relative_to(self.backup_root)
@@ -132,7 +169,13 @@ class BackupManager:
         self._status_cache = None
         self._status_cache_at = 0.0
 
-    def _record_backup_write(self, source_path: Path, backup_modified: float | None = None) -> None:
+    def _record_backup_write(
+        self,
+        source_path: Path,
+        backup_modified: float | None = None,
+        *,
+        version_delta: int = 1,
+    ) -> None:
         if self._status_cache is None:
             self._status_cache = {
                 "files_secured": 0,
@@ -147,7 +190,8 @@ class BackupManager:
             self._known_sources.add(source_key)
             self._status_cache["files_secured"] = int(self._status_cache.get("files_secured", 0)) + 1
 
-        self._status_cache["backup_versions"] = int(self._status_cache.get("backup_versions", 0)) + 1
+        current_versions = int(self._status_cache.get("backup_versions", 0))
+        self._status_cache["backup_versions"] = max(0, current_versions + int(version_delta))
 
         timestamp = datetime.fromtimestamp(
             backup_modified if backup_modified is not None else time.time(),
@@ -179,15 +223,17 @@ class BackupManager:
         backup_files = [path for path in self.backup_root.rglob("*") if path.is_file()]
 
         unique_sources: dict[str, float] = {}
+        managed_backup_versions = 0
         latest_timestamp = 0.0
         for backup_path in backup_files:
-            modified = backup_path.stat().st_mtime
-            if modified > latest_timestamp:
-                latest_timestamp = modified
-
             source_path = self._source_path_from_backup(backup_path)
             if source_path is None:
                 continue
+
+            managed_backup_versions += 1
+            modified = backup_path.stat().st_mtime
+            if modified > latest_timestamp:
+                latest_timestamp = modified
 
             source_key = str(source_path)
             current_seen = unique_sources.get(source_key, 0.0)
@@ -202,7 +248,7 @@ class BackupManager:
 
         payload = {
             "files_secured": len(unique_sources),
-            "backup_versions": len(backup_files),
+            "backup_versions": managed_backup_versions,
             "last_backup_time": (
                 datetime.fromtimestamp(latest_timestamp, timezone.utc).isoformat() if latest_timestamp > 0 else None
             ),
@@ -234,7 +280,10 @@ class BackupManager:
                 return None
 
             versions = self._existing_versions(root_label, relative_path)
-            version_number = len(versions) + 1
+            if len(versions) >= self.max_backups_per_file:
+                return None
+
+            version_number = self._next_version_number(versions)
             destination = (
                 self.backup_root
                 / root_label
@@ -257,7 +306,7 @@ class BackupManager:
                 continue
             for file_path in root.rglob("*"):
                 if file_path.is_file():
-                    result = self.backup_file(file_path, force=True)
+                    result = self.backup_file(file_path, force=False)
                     if result is not None:
                         results.append(result)
         return results
