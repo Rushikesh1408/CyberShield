@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 
 import ActivityChart from '../components/ActivityChart';
 import AlertsPanel from '../components/AlertsPanel';
+import BackupRecoveryPanel from '../components/BackupRecoveryPanel';
+import EmergencyPanel from '../components/EmergencyPanel';
 import FingerprintPanel from '../components/FingerprintPanel';
 import LogsTimeline from '../components/LogsTimeline';
 import StatusCard from '../components/StatusCard';
@@ -10,6 +12,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
 
 const initialSnapshot = {
   status: 'SAFE',
+  is_monitoring: false,
   monitor_paths: [],
   monitoring_message: 'Monitoring: Protected System Directories (Auto-configured)',
   metrics: {
@@ -43,12 +46,23 @@ function timeLabel(timestamp) {
   });
 }
 
-async function fetchJson(path, options = {}) {
+async function fetchJson(path, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  const method = (options.method ?? 'GET').toUpperCase();
+  const headers = { ...(options.headers ?? {}) };
+  if (method !== 'GET' && method !== 'HEAD' && options.body !== undefined) {
+    headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     ...options,
-    cache: 'no-store',
+    signal: controller.signal,
   });
+
+  window.clearTimeout(timeoutId);
 
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
@@ -62,7 +76,48 @@ export default function DashboardPage() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [clearingLogs, setClearingLogs] = useState(false);
+  const [isRunningBackup, setIsRunningBackup] = useState(false);
+  const [isRecovering, setIsRecovering] = useState(false);
+  const [backupStatus, setBackupStatus] = useState({
+    status: 'Inactive',
+    files_secured: 0,
+    backup_versions: 0,
+    last_backup_time: null,
+    recent_files: [],
+    backup_root: '',
+  });
+  const [backupMessage, setBackupMessage] = useState('');
+  const [emergencyContact, setEmergencyContact] = useState('');
+  const [isSavingContact, setIsSavingContact] = useState(false);
+  const [isDownloadingReport, setIsDownloadingReport] = useState(false);
+  const [emergencyMessage, setEmergencyMessage] = useState('');
   const [error, setError] = useState('');
+
+  const loadEmergencyContact = async () => {
+    try {
+      const data = await fetchJson('/api/emergency/contact', {}, 5000);
+      setEmergencyContact(String(data.contact ?? ''));
+    } catch {
+      // Keep current value to avoid breaking main dashboard polling.
+    }
+  };
+
+  const loadBackupStatus = async () => {
+    try {
+      const backupData = await fetchJson('/api/backup/status', {}, 5000);
+      setBackupStatus({
+        status: backupData.status ?? 'Inactive',
+        files_secured: Number(backupData.files_secured ?? 0),
+        backup_versions: Number(backupData.backup_versions ?? 0),
+        last_backup_time: backupData.last_backup_time ?? null,
+        recent_files: Array.isArray(backupData.recent_files) ? backupData.recent_files : [],
+        backup_root: backupData.backup_root ?? '',
+      });
+    } catch {
+      // Keep existing backup status to avoid blocking realtime metrics UI.
+    }
+  };
 
   const loadSnapshot = async () => {
     try {
@@ -77,6 +132,7 @@ export default function DashboardPage() {
 
       setSnapshot({
         status: statusData.status,
+        is_monitoring: Boolean(statusData.is_monitoring),
         monitor_paths: statusData.monitor_paths ?? [],
         monitoring_message:
           statusData.monitoring_message ??
@@ -94,7 +150,11 @@ export default function DashboardPage() {
       setHistory(graphHistory);
       setError('');
     } catch (requestError) {
-      setError(requestError.message);
+      if (requestError.name === 'AbortError') {
+        setError('Request timeout. Reconnecting to backend...');
+      } else {
+        setError(requestError.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -102,8 +162,16 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadSnapshot();
-    const interval = window.setInterval(loadSnapshot, 2000);
-    return () => window.clearInterval(interval);
+    loadBackupStatus();
+    loadEmergencyContact();
+
+    const snapshotInterval = window.setInterval(loadSnapshot, 2000);
+    const backupInterval = window.setInterval(loadBackupStatus, 10000);
+
+    return () => {
+      window.clearInterval(snapshotInterval);
+      window.clearInterval(backupInterval);
+    };
   }, []);
 
   const isUnderAttack = snapshot.status === 'UNDER_ATTACK';
@@ -123,7 +191,7 @@ export default function DashboardPage() {
     try {
       await fetchJson('/api/start', {
         method: 'POST',
-      });
+      }, 20000);
       await loadSnapshot();
     } catch (requestError) {
       setError(requestError.message);
@@ -135,12 +203,123 @@ export default function DashboardPage() {
   const handleStop = async () => {
     setBusy(true);
     try {
-      await fetchJson('/api/stop', { method: 'POST' });
+      await fetchJson('/api/stop', { method: 'POST' }, 20000);
       await loadSnapshot();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleClearLogs = async () => {
+    setClearingLogs(true);
+    try {
+      await fetchJson('/api/logs/clear', { method: 'POST' });
+      setSnapshot((current) => ({ ...current, logs: [] }));
+      await loadSnapshot();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setClearingLogs(false);
+    }
+  };
+
+  const handleRunBackup = async () => {
+    setIsRunningBackup(true);
+    try {
+      const response = await fetchJson('/api/backup/run', { method: 'POST' });
+      setBackupMessage(`Backup completed. Created versions: ${response.created ?? 0}`);
+      await loadSnapshot();
+      await loadBackupStatus();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsRunningBackup(false);
+    }
+  };
+
+  const handleRecoverFile = async (filePath) => {
+    setIsRecovering(true);
+    try {
+      await fetchJson('/api/backup/recover', {
+        method: 'POST',
+        body: JSON.stringify({ file_path: filePath }),
+      });
+      setBackupMessage(`Recovered file: ${filePath}`);
+      await loadSnapshot();
+      await loadBackupStatus();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsRecovering(false);
+    }
+  };
+
+  const handleSaveEmergencyContact = async () => {
+    const phone = emergencyContact.trim();
+    if (!phone) {
+      setEmergencyMessage('Please enter a phone number before saving.');
+      return;
+    }
+
+    setIsSavingContact(true);
+    try {
+      const response = await fetchJson('/api/emergency/contact', {
+        method: 'POST',
+        body: JSON.stringify({ phone }),
+      });
+      setEmergencyContact(String(response.contact ?? phone));
+      setEmergencyMessage('Emergency contact saved successfully.');
+      setError('');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsSavingContact(false);
+    }
+  };
+
+  const handleDownloadAttackReport = async () => {
+    setIsDownloadingReport(true);
+    try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+      const response = await fetch(`${API_BASE}/api/report/download`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      window.clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        let message = `Request failed: ${response.status}`;
+        try {
+          const payload = await response.json();
+          message = payload.message ? String(payload.message) : message;
+        } catch {
+          // Ignore JSON parsing errors for non-JSON responses.
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = downloadUrl;
+      anchor.download = 'attack_report.txt';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setEmergencyMessage('Attack report downloaded.');
+      setError('');
+    } catch (requestError) {
+      const rawMessage = String(requestError.message ?? 'Failed to download report.');
+      if (rawMessage.toLowerCase().includes('report_not_found')) {
+        setEmergencyMessage('No attack report available yet. Trigger a simulation first.');
+      }
+      setError(rawMessage);
+    } finally {
+      setIsDownloadingReport(false);
     }
   };
 
@@ -172,7 +351,7 @@ export default function DashboardPage() {
                   {snapshot.status}
                 </span>
                 <span className="rounded-full border border-slate-700 bg-slate-900/70 px-4 py-2 text-sm text-slate-300">
-                  Monitor: {snapshot.metrics.status}
+                  Monitor: {snapshot.is_monitoring ? 'Active' : 'Inactive'}
                 </span>
                 {loading ? (
                   <span className="text-sm text-slate-400">Loading live snapshot...</span>
@@ -188,8 +367,8 @@ export default function DashboardPage() {
                 />
                 <StatusCard
                   title="CPU"
-                  value={`${cpuDisplayValue.toFixed(1)}%`}
-                  caption="Task-Manager calibrated live reading"
+                  value={`${snapshot.metrics.cpu_percent.toFixed(1)}%`}
+                  caption="Host CPU spike check"
                   accent={isUnderAttack ? 'rose' : 'green'}
                 />
                 <StatusCard
@@ -271,9 +450,32 @@ export default function DashboardPage() {
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-          <LogsTimeline logs={snapshot.logs} />
+          <LogsTimeline
+            logs={snapshot.logs}
+            onClearLogs={handleClearLogs}
+            isClearingLogs={clearingLogs}
+          />
           <FingerprintPanel fingerprints={snapshot.fingerprints} />
         </section>
+
+        <BackupRecoveryPanel
+          backupStatus={backupStatus}
+          onRunBackup={handleRunBackup}
+          onRecoverFile={handleRecoverFile}
+          isRunningBackup={isRunningBackup}
+          isRecovering={isRecovering}
+          message={backupMessage}
+        />
+
+        <EmergencyPanel
+          emergencyContact={emergencyContact}
+          onEmergencyContactChange={setEmergencyContact}
+          onSaveContact={handleSaveEmergencyContact}
+          onDownloadReport={handleDownloadAttackReport}
+          isSavingContact={isSavingContact}
+          isDownloadingReport={isDownloadingReport}
+          message={emergencyMessage}
+        />
       </div>
     </main>
   );

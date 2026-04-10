@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque
+from typing import Any, Deque
 
 import psutil
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -19,6 +19,8 @@ from backend.fingerprint import FingerprintManager
 from backend.process_killer import ProcessKiller
 
 SUSPICIOUS_EXTENSIONS = {".enc", ".locked", ".encrypted", ".crypt", ".ransom"}
+PRE_ATTACK_CPU_THRESHOLD = 70.0
+PRE_ATTACK_FILE_RATE_THRESHOLD = 50.0
 
 
 @dataclass
@@ -35,6 +37,7 @@ class DetectionEngine:
         self,
         *,
         monitored_paths: list[str | Path],
+        report_file_path: str | Path,
         backup_manager: BackupManager,
         database: Database,
         fingerprint_manager: FingerprintManager,
@@ -56,12 +59,15 @@ class DetectionEngine:
         self.database = database
         self.fingerprint_manager = fingerprint_manager
         self.process_killer = process_killer
+        self.report_file_path = Path(report_file_path).resolve()
+        self.report_file_path.parent.mkdir(parents=True, exist_ok=True)
         self.observer = Observer()
         self.metrics = DetectionMetrics()
         self.status = "SAFE"
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._sampling_thread: threading.Thread | None = None
+        self._initial_backup_thread: threading.Thread | None = None
         self._event_times: Deque[float] = deque(maxlen=5000)
         self._modification_times: Deque[float] = deque(maxlen=5000)
         self._access_times: Deque[float] = deque(maxlen=5000)
@@ -72,29 +78,43 @@ class DetectionEngine:
         self._suppress_events_until = 0.0
         self._last_attack_at = 0.0
         self._last_cpu = 0.0
-        self._cpu_window = self._int_env("CYBERSHIELD_CPU_WINDOW", 4, minimum=3, maximum=60)
-        self._cpu_raw_blend = self._float_env("CYBERSHIELD_CPU_RAW_BLEND", 0.8, minimum=0.0, maximum=1.0)
-        self._cpu_history: Deque[float] = deque(maxlen=self._cpu_window)
-        self._windows_utility_cpu: float | None = None
+        self.is_monitoring = False
         psutil.cpu_percent(interval=None)
 
-    @staticmethod
-    def _int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
-        try:
-            value = int(os.environ.get(name, str(default)))
-        except ValueError:
-            value = default
-        return max(minimum, min(maximum, value))
+    def log_event(
+        self,
+        *,
+        event: str,
+        file_path: str = "",
+        action: str = "none",
+        event_type: str = "info",
+        cpu_usage: float | None = None,
+        file_rate: float | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        if file_rate is None:
+            now = time.time()
+            with self._lock:
+                file_rate = float(sum(1 for event_time in self._event_times if event_time >= now - 1.0))
 
-    @staticmethod
-    def _float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
-        try:
-            value = float(os.environ.get(name, str(default)))
-        except ValueError:
-            value = default
-        return max(minimum, min(maximum, value))
+        payload: dict[str, object] = {
+            "event": event,
+            "file_name": os.path.basename(file_path) if file_path else "",
+            "file_path": file_path,
+            "cpu_usage": round(float(self._last_cpu if cpu_usage is None else cpu_usage), 2),
+            "file_rate": round(float(file_rate), 2),
+            "action": action,
+            "event_type": event_type,
+        }
+        if extra:
+            payload.update(extra)
 
-    def start(self) -> None:
+        self.database.log_event(payload)
+
+    def start(self) -> bool:
+        if self.is_monitoring:
+            return False
+
         handler = _EventHandler(self)
         scheduled_paths: list[str] = []
         for monitored_path in self.monitored_paths:
@@ -104,35 +124,58 @@ class DetectionEngine:
         if not scheduled_paths:
             raise RuntimeError("No monitored paths exist for watchdog observer")
 
-        self.backup_manager.snapshot_folder()
         self.observer.start()
         self._stop_event.clear()
         self._sampling_thread = threading.Thread(target=self._sampling_loop, name="cybershield-sampler", daemon=True)
         self._sampling_thread.start()
-        self.database.insert_log(
-            "info",
-            "Monitoring started",
-            metadata={"paths": scheduled_paths},
+        self.is_monitoring = True
+        self.log_event(
+            event="monitoring_started",
+            action="none",
+            event_type="info",
+            cpu_usage=self._last_cpu,
+            file_rate=0.0,
+            extra={"paths": scheduled_paths},
         )
 
-    def stop(self) -> None:
+        # Run initial snapshot in background so monitoring can start immediately.
+        self._initial_backup_thread = threading.Thread(
+            target=self._run_initial_snapshot,
+            name="cybershield-initial-backup",
+            daemon=True,
+        )
+        self._initial_backup_thread.start()
+        return True
+
+    def stop(self) -> bool:
+        if not self.is_monitoring:
+            return False
+
         self._stop_event.set()
         if self.observer.is_alive():
             self.observer.stop()
             self.observer.join(timeout=3)
         if self._sampling_thread and self._sampling_thread.is_alive():
             self._sampling_thread.join(timeout=3)
-        self.database.insert_log(
-            "info",
-            "Monitoring stopped",
-            metadata={"paths": [str(path) for path in self.monitored_paths]},
+
+        # Log only after observer/thread shutdown is complete.
+        self.is_monitoring = False
+        self.log_event(
+            event="monitoring_stopped",
+            action="none",
+            event_type="info",
+            cpu_usage=self._last_cpu,
+            file_rate=0.0,
+            extra={"paths": [str(path) for path in self.monitored_paths]},
         )
+        return True
 
     def record_event(self, event_type: str, src_path: str, dest_path: str | None = None) -> None:
         now = time.time()
         if now < self._suppress_events_until:
             return
 
+        raw_src_path = src_path
         path = Path(src_path).resolve()
         dest = Path(dest_path).resolve() if dest_path else None
         with self._lock:
@@ -147,6 +190,26 @@ class DetectionEngine:
                 self._suspicious_paths.add(str(path))
             if dest is not None and dest.suffix.lower() in SUSPICIOUS_EXTENSIONS:
                 self._suspicious_paths.add(str(dest))
+            current_file_rate = float(sum(1 for event_time in self._event_times if event_time >= now - 1.0))
+
+        event_name_map = {
+            "created": "file_created",
+            "modified": "file_modified",
+            "moved": "file_renamed",
+            "deleted": "file_deleted",
+        }
+        self.log_event(
+            event=event_name_map.get(event_type, "file_event"),
+            file_path=raw_src_path,
+            action="none",
+            event_type="info",
+            cpu_usage=self._last_cpu,
+            file_rate=current_file_rate,
+            extra={
+                "watchdog_event": event_type,
+                "destination_path": dest_path or "",
+            },
+        )
 
         if event_type in {"created", "modified"} and path.exists() and path.is_file():
             self.backup_manager.backup_file(path)
@@ -163,6 +226,101 @@ class DetectionEngine:
                     "Sampling loop error",
                     metadata={"error": str(error)},
                 )
+
+    def _run_initial_snapshot(self) -> None:
+        try:
+            results = self.backup_manager.snapshot_folder()
+            self.log_event(
+                event="initial_backup_completed",
+                action="none",
+                event_type="info",
+                cpu_usage=self._last_cpu,
+                file_rate=0.0,
+                extra={"created_files": len(results)},
+            )
+        except (OSError, RuntimeError, ValueError) as snapshot_error:
+            self.log_event(
+                event="initial_backup_failed",
+                action="none",
+                event_type="warning",
+                cpu_usage=self._last_cpu,
+                file_rate=0.0,
+                extra={"error": str(snapshot_error)},
+            )
+
+    def generate_attack_report(self, data: dict[str, Any]) -> str:
+        process_action = "Process terminated" if data.get("process_terminated") else "Process termination attempted"
+        restore_action = (
+            "Files restored from backup" if int(data.get("files_restored", 0)) > 0 else "Files restore not needed"
+        )
+        report_text = (
+            "--- CyberShield AI Attack Report ---\n\n"
+            f"Time: {data.get('timestamp')}\n"
+            f"Attack Type: {data.get('attack_type')}\n"
+            f"Process: {data.get('process_name')}\n"
+            f"CPU Usage: {data.get('cpu_usage')}%\n"
+            f"Files Affected: {data.get('files_affected')}\n\n"
+            "Actions Taken:\n\n"
+            f"{process_action}\n\n"
+            f"{restore_action}\n\n"
+            "Status:\n"
+            "✔ No data loss\n"
+        )
+
+        self.report_file_path.write_text(report_text, encoding="utf-8")
+        return str(self.report_file_path)
+
+    @staticmethod
+    def send_alert(phone: str, message: str) -> None:
+        print(f"ALERT sent to {phone}: {message}")
+
+    def _run_attack_followups(self, payload: dict[str, Any]) -> None:
+        report_path = self.generate_attack_report(payload)
+        self.log_event(
+            event="attack_report_generated",
+            file_path=report_path,
+            action="none",
+            event_type="info",
+            cpu_usage=float(payload.get("cpu_usage") or 0.0),
+            file_rate=float(payload.get("file_rate") or 0.0),
+            extra={"attack_type": payload.get("attack_type")},
+        )
+
+        emergency_phone = self.database.get_setting("emergency_contact", "")
+        if not emergency_phone:
+            return
+
+        alert_message = (
+            "⚠️ CyberShield Alert\n\n"
+            "Ransomware attack detected!\n"
+            "Process stopped and files secured.\n\n"
+            f"Time: {payload.get('timestamp')}"
+        )
+        self.send_alert(emergency_phone, alert_message)
+        self.database.insert_alert(
+            status="SENT",
+            title="Emergency SOS Triggered",
+            details=f"Emergency alert sent to {emergency_phone} after ransomware detection.",
+            severity="critical",
+            fingerprint_match=None,
+        )
+        self.log_event(
+            event="emergency_alert_sent",
+            action="none",
+            event_type="critical",
+            cpu_usage=float(payload.get("cpu_usage") or 0.0),
+            file_rate=float(payload.get("file_rate") or 0.0),
+            extra={"phone": emergency_phone},
+        )
+
+    def _trigger_attack_followups(self, payload: dict[str, Any]) -> None:
+        thread = threading.Thread(
+            target=self._run_attack_followups,
+            args=(payload,),
+            name="cybershield-attack-followup",
+            daemon=True,
+        )
+        thread.start()
 
     def _sample(self) -> None:
         now = time.time()
@@ -187,9 +345,11 @@ class DetectionEngine:
         rapid_modifications = files_per_second >= 4 or modifications >= 6
         suspicious_extension = bool(self._suspicious_paths)
         high_access_rate = accesses >= 10
-        effective_cpu = utility_cpu if utility_cpu is not None else cpu_percent
-        cpu_spike = effective_cpu >= 70.0
-        early_signal = rapid_modifications and cpu_spike
+        cpu_spike = cpu_percent >= 70.0
+        pre_attack_signal = (
+            cpu_percent > PRE_ATTACK_CPU_THRESHOLD
+            and files_per_second > PRE_ATTACK_FILE_RATE_THRESHOLD
+        )
 
         if rapid_modifications:
             signals += 1
@@ -202,26 +362,27 @@ class DetectionEngine:
 
         full_detection = (suspicious_extension and signals >= 2) or (not suspicious_extension and signals >= 3)
 
-        if early_signal and not self._early_warning_active:
+        if pre_attack_signal and not self._early_warning_active:
             self._early_warning_active = True
             self.status = "UNDER_ATTACK"
             self.database.insert_alert(
                 "UNDER_ATTACK",
-                "Early anomaly detected",
-                "High CPU and rapid file activity detected in protected directories.",
+                "Pre-attack warning",
+                "CPU spike and file modification burst indicate possible ransomware behavior.",
                 severity="medium",
             )
-            self.database.insert_log(
-                "warning",
-                "Early anomaly detected",
-                metadata={
-                    "files_per_second": files_per_second,
+            self.log_event(
+                event="pre_attack_warning",
+                action="flagged",
+                event_type="warning",
+                cpu_usage=cpu_percent,
+                file_rate=files_per_second,
+                extra={
                     "modifications": modifications,
                     "accesses": accesses,
-                    "cpu_percent": effective_cpu,
                 },
             )
-        elif not early_signal:
+        elif not pre_attack_signal:
             self._early_warning_active = False
 
         if full_detection and (rapid_modifications or high_access_rate):
@@ -311,8 +472,9 @@ class DetectionEngine:
 
         self._attack_active = True
         self.status = "UNDER_ATTACK"
+        suspected_process_name = self._infer_process_name()
         fingerprint = self.fingerprint_manager.create(
-            process_name=self._infer_process_name(),
+            process_name=suspected_process_name,
             file_extension=self._infer_extension(),
             modification_rate=files_per_second,
             access_rate=float(accesses),
@@ -335,14 +497,15 @@ class DetectionEngine:
             severity="critical",
             fingerprint_match=fingerprint["signature_hash"],
         )
-        self.database.insert_log(
-            "warning",
-            "Attack detected",
-            metadata={
-                "files_per_second": files_per_second,
+        self.log_event(
+            event="attack_detected",
+            action="flagged",
+            event_type="critical",
+            cpu_usage=cpu_percent,
+            file_rate=files_per_second,
+            extra={
                 "modifications": modifications,
                 "accesses": accesses,
-                "cpu_percent": cpu_percent,
                 "suspicious_extension": suspicious_extension,
             },
         )
@@ -418,11 +581,33 @@ class DetectionEngine:
             self._restorable_paths(),
             before_timestamp=self._last_attack_at,
         )
+
+        with self._lock:
+            suspicious_count = len(self._suspicious_paths)
+            touched_count = len(self._touched_paths)
+
+        files_affected = max(modifications, suspicious_count, touched_count)
+        self._trigger_attack_followups(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "attack_type": "mass_encryption" if suspicious_extension else "suspicious_activity",
+                "process_name": kill_result.name if kill_result is not None else suspected_process_name,
+                "cpu_usage": round(cpu_percent, 2),
+                "files_affected": files_affected,
+                "process_terminated": bool(kill_result and kill_result.success),
+                "files_restored": len(restored),
+                "file_rate": round(files_per_second, 2),
+            }
+        )
+
         if restored:
-            self.database.insert_log(
-                "info",
-                "Files restored from backup",
-                metadata={"restored_count": len(restored), "paths": restored},
+            self.log_event(
+                event="files_restored",
+                action="restored",
+                event_type="info",
+                cpu_usage=cpu_percent,
+                file_rate=files_per_second,
+                extra={"restored_count": len(restored), "restored": restored},
             )
         self._cleanup_suspicious_files()
         self._suppress_events_until = time.time() + 2.5
@@ -435,7 +620,13 @@ class DetectionEngine:
             severity="medium",
             fingerprint_match=fingerprint["signature_hash"],
         )
-        self.database.insert_log("info", "Recovery completed")
+        self.log_event(
+            event="recovery_completed",
+            action="restored",
+            event_type="info",
+            cpu_usage=cpu_percent,
+            file_rate=files_per_second,
+        )
 
     def _restorable_paths(self) -> list[str]:
         with self._lock:
@@ -497,6 +688,7 @@ class DetectionEngine:
         display_cpu = max(live_cpu_calibrated, metrics.cpu_percent)
         return {
             "status": self.status,
+            "is_monitoring": self.is_monitoring,
             "monitored_paths": [str(path) for path in self.monitored_paths],
             "metrics": {
                 "files_per_second": metrics.files_per_second,

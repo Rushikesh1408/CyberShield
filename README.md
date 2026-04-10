@@ -1,6 +1,6 @@
-# CyberShield AI - Real-Time Ransomware Defense & Zero Data Loss System
+# CyberShield - Real-Time Ransomware Defense & Zero Data Loss System
 
-CyberShield AI is a lightweight ransomware defense tool for hackathon demos and local use. It automatically monitors protected system directories (Documents, Downloads, Desktop) or falls back to a local protected_folder, detects ransomware-like file bursts, kills suspicious processes, restores files from versioned backups, and stores attack fingerprints in SQLite.
+CyberShield  is a lightweight ransomware defense tool for hackathon demos and local use. It automatically monitors protected system directories (Documents, Downloads, Desktop) or falls back to a local protected_folder, detects ransomware-like file bursts, kills suspicious processes, restores files from versioned backups, and stores attack fingerprints in SQLite.
 
 ## What is included
 

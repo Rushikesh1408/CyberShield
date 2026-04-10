@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -38,6 +41,17 @@ class BackupManager:
         self._lock = threading.Lock()
         self._hash_cache: dict[str, str] = {}
         self._root_labels = self._build_root_labels(self.source_roots)
+        self._label_to_root = {label: Path(root) for root, label in self._root_labels.items()}
+        self._known_sources: set[str] = set()
+        self._status_cache: dict[str, object] | None = {
+            "files_secured": 0,
+            "backup_versions": 0,
+            "last_backup_time": None,
+            "recent_files": [],
+            "backup_root": str(self.backup_root),
+        }
+        self._status_cache_at = 0.0
+        self._status_cache_ttl_seconds = 15.0
 
     @staticmethod
     def _sanitize_root_label(path: Path) -> str:
@@ -91,6 +105,116 @@ class BackupManager:
         pattern = f"{relative_path.stem}_v*{relative_path.suffix}"
         return sorted(backup_dir.glob(pattern))
 
+    @staticmethod
+    def _remove_version_suffix(file_name_stem: str) -> str:
+        return re.sub(r"_v\d+$", "", file_name_stem)
+
+    def _source_path_from_backup(self, backup_path: Path) -> Path | None:
+        try:
+            relative = backup_path.relative_to(self.backup_root)
+        except ValueError:
+            return None
+
+        if len(relative.parts) < 2:
+            return None
+
+        root_label = relative.parts[0]
+        source_root = self._label_to_root.get(root_label)
+        if source_root is None:
+            return None
+
+        relative_with_version = Path(*relative.parts[1:])
+        restored_name = f"{self._remove_version_suffix(relative_with_version.stem)}{relative_with_version.suffix}"
+        source_relative = relative_with_version.with_name(restored_name)
+        return (source_root / source_relative).resolve()
+
+    def _invalidate_status_cache(self) -> None:
+        self._status_cache = None
+        self._status_cache_at = 0.0
+
+    def _record_backup_write(self, source_path: Path, backup_modified: float | None = None) -> None:
+        if self._status_cache is None:
+            self._status_cache = {
+                "files_secured": 0,
+                "backup_versions": 0,
+                "last_backup_time": None,
+                "recent_files": [],
+                "backup_root": str(self.backup_root),
+            }
+
+        source_key = str(source_path.resolve())
+        if source_key not in self._known_sources:
+            self._known_sources.add(source_key)
+            self._status_cache["files_secured"] = int(self._status_cache.get("files_secured", 0)) + 1
+
+        self._status_cache["backup_versions"] = int(self._status_cache.get("backup_versions", 0)) + 1
+
+        timestamp = datetime.fromtimestamp(
+            backup_modified if backup_modified is not None else time.time(),
+            timezone.utc,
+        ).isoformat()
+        self._status_cache["last_backup_time"] = timestamp
+
+        recent_files = list(self._status_cache.get("recent_files", []))
+        if source_key in recent_files:
+            recent_files.remove(source_key)
+        recent_files.insert(0, source_key)
+        self._status_cache["recent_files"] = recent_files[:25]
+        self._status_cache_at = time.time()
+
+    @staticmethod
+    def _clone_status_payload(payload: dict[str, object]) -> dict[str, object]:
+        clone = dict(payload)
+        clone["recent_files"] = list(payload.get("recent_files", []))
+        return clone
+
+    def backup_status(self, *, force_refresh: bool = False) -> dict[str, object]:
+        with self._lock:
+            if (
+                not force_refresh
+                and self._status_cache is not None
+            ):
+                return self._clone_status_payload(self._status_cache)
+
+        backup_files = [path for path in self.backup_root.rglob("*") if path.is_file()]
+
+        unique_sources: dict[str, float] = {}
+        latest_timestamp = 0.0
+        for backup_path in backup_files:
+            modified = backup_path.stat().st_mtime
+            if modified > latest_timestamp:
+                latest_timestamp = modified
+
+            source_path = self._source_path_from_backup(backup_path)
+            if source_path is None:
+                continue
+
+            source_key = str(source_path)
+            current_seen = unique_sources.get(source_key, 0.0)
+            if modified > current_seen:
+                unique_sources[source_key] = modified
+
+        recent_files = [
+            source_path
+            for source_path, _ in sorted(unique_sources.items(), key=lambda item: item[1], reverse=True)[:25]
+        ]
+        known_sources = set(unique_sources.keys())
+
+        payload = {
+            "files_secured": len(unique_sources),
+            "backup_versions": len(backup_files),
+            "last_backup_time": (
+                datetime.fromtimestamp(latest_timestamp, timezone.utc).isoformat() if latest_timestamp > 0 else None
+            ),
+            "recent_files": recent_files,
+            "backup_root": str(self.backup_root),
+        }
+        with self._lock:
+            self._known_sources = known_sources
+            self._status_cache = payload
+            self._status_cache_at = time.time()
+        return self._clone_status_payload(payload)
+
     def backup_file(self, source_path: str | Path, *, force: bool = False) -> BackupResult | None:
         path = Path(source_path)
         if not path.exists() or path.is_dir():
@@ -122,6 +246,7 @@ class BackupManager:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
             self._hash_cache[cache_key] = current_hash
+            self._record_backup_write(path, destination.stat().st_mtime)
             return BackupResult(str(path), str(destination), version_number)
 
     def snapshot_folder(self, folder: str | Path | None = None) -> list[BackupResult]:
