@@ -48,8 +48,8 @@ export default function BackupRecoveryPanel({
     <section className="rounded-3xl border border-slate-700/70 bg-slate-950/70 p-5 shadow-glow">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <div className="text-sm uppercase tracking-[0.26em] text-emerald-300/80">Backup & Recovery</div>
-          <h2 className="mt-2 text-xl font-semibold text-white">Versioned safety layer</h2>
+          <div className="text-sm uppercase tracking-[0.26em] text-emerald-300/80">Versioned Snapshot System</div>
+          <h2 className="mt-2 text-xl font-semibold text-white">Automatic System Recovery</h2>
         </div>
         <button
           type="button"
@@ -57,7 +57,7 @@ export default function BackupRecoveryPanel({
           disabled={isRunningBackup}
           className="rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-200 transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/70 disabled:text-slate-500"
         >
-          {isRunningBackup ? 'Running...' : 'Run Backup Now'}
+          {isRunningBackup ? 'Running...' : 'Run Snapshot Now'}
         </button>
       </div>
 
@@ -90,7 +90,7 @@ export default function BackupRecoveryPanel({
       <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
         <div className="text-sm uppercase tracking-[0.24em] text-slate-400">Recover File</div>
         <p className="mt-2 text-sm text-slate-300">
-          Select a secured file or paste a full path, then restore the latest backup version.
+          Select a secured file or paste a full path, then restore it using Automatic System Recovery.
         </p>
 
         <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto]">

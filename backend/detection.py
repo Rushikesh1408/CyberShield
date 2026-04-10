@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from collections import deque
@@ -21,6 +22,7 @@ from backend.process_killer import ProcessKiller
 SUSPICIOUS_EXTENSIONS = {".enc", ".locked", ".encrypted", ".crypt", ".ransom"}
 PRE_ATTACK_CPU_THRESHOLD = 70.0
 PRE_ATTACK_FILE_RATE_THRESHOLD = 50.0
+THREAT_CONFIDENCE_MAX_FILE_RATE = 50.0
 
 
 @dataclass
@@ -29,6 +31,7 @@ class DetectionMetrics:
     modifications: int = 0
     accesses: int = 0
     cpu_percent: float = 0.0
+    threat_confidence: int = 0
     status: str = "SAFE"
 
 
@@ -78,6 +81,10 @@ class DetectionEngine:
         self._suppress_events_until = 0.0
         self._last_attack_at = 0.0
         self._last_cpu = 0.0
+        self._cpu_history: Deque[float] = deque(maxlen=30)
+        self._windows_utility_cpu: float | None = None
+        self._cpu_raw_blend = 0.7
+        self._threat_confidence = 0
         self.is_monitoring = False
         psutil.cpu_percent(interval=None)
 
@@ -220,7 +227,7 @@ class DetectionEngine:
         while not self._stop_event.wait(1.0):
             try:
                 self._sample()
-            except Exception as error:
+            except (RuntimeError, ValueError, OSError, psutil.Error) as error:
                 self.database.insert_log(
                     "error",
                     "Sampling loop error",
@@ -249,12 +256,18 @@ class DetectionEngine:
             )
 
     def generate_attack_report(self, data: dict[str, Any]) -> str:
-        process_action = "Process terminated" if data.get("process_terminated") else "Process termination attempted"
+        process_action = (
+            "Active Threat Neutralization executed"
+            if data.get("process_terminated")
+            else "Active Threat Neutralization attempted"
+        )
         restore_action = (
-            "Files restored from backup" if int(data.get("files_restored", 0)) > 0 else "Files restore not needed"
+            "Automatic System Recovery restored files"
+            if int(data.get("files_restored", 0)) > 0
+            else "Automatic System Recovery not required"
         )
         report_text = (
-            "--- CyberShield AI Attack Report ---\n\n"
+            "--- CyberShield Attack Report ---\n\n"
             f"Time: {data.get('timestamp')}\n"
             f"Attack Type: {data.get('attack_type')}\n"
             f"Process: {data.get('process_name')}\n"
@@ -264,7 +277,7 @@ class DetectionEngine:
             f"{process_action}\n\n"
             f"{restore_action}\n\n"
             "Status:\n"
-            "✔ No data loss\n"
+            "✔ System secured\n"
         )
 
         self.report_file_path.write_text(report_text, encoding="utf-8")
@@ -283,7 +296,12 @@ class DetectionEngine:
             event_type="info",
             cpu_usage=float(payload.get("cpu_usage") or 0.0),
             file_rate=float(payload.get("file_rate") or 0.0),
-            extra={"attack_type": payload.get("attack_type")},
+            extra={
+                "attack_type": payload.get("attack_type"),
+                "files_affected": int(payload.get("files_affected") or 0),
+                "files_recovered": int(payload.get("files_restored") or 0),
+                "threat_confidence": int(payload.get("threat_confidence") or 0),
+            },
         )
 
         emergency_phone = self.database.get_setting("emergency_contact", "")
@@ -291,9 +309,9 @@ class DetectionEngine:
             return
 
         alert_message = (
-            "⚠️ CyberShield Alert\n\n"
+            "CyberShield Emergency Alert\n\n"
             "Ransomware attack detected!\n"
-            "Process stopped and files secured.\n\n"
+            "Active Threat Neutralization and Automatic System Recovery executed.\n\n"
             f"Time: {payload.get('timestamp')}"
         )
         self.send_alert(emergency_phone, alert_message)
@@ -345,11 +363,23 @@ class DetectionEngine:
         rapid_modifications = files_per_second >= 4 or modifications >= 6
         suspicious_extension = bool(self._suspicious_paths)
         high_access_rate = accesses >= 10
-        cpu_spike = cpu_percent >= 70.0
+        cpu_spike = cpu_for_detection >= 70.0
         pre_attack_signal = (
-            cpu_percent > PRE_ATTACK_CPU_THRESHOLD
+            cpu_for_detection > PRE_ATTACK_CPU_THRESHOLD
             and files_per_second > PRE_ATTACK_FILE_RATE_THRESHOLD
         )
+
+        cpu_usage = cpu_for_detection
+        file_rate = files_per_second
+        max_file_rate = THREAT_CONFIDENCE_MAX_FILE_RATE
+
+        cpu_score = min(cpu_usage / 100, 1)
+        file_score = min(file_rate / max_file_rate, 1)
+        ext_score = 1 if suspicious_extension else 0
+
+        confidence = (cpu_score + file_score + ext_score) / 3
+        confidence_percent = int(confidence * 100)
+        self._threat_confidence = confidence_percent
 
         if rapid_modifications:
             signals += 1
@@ -367,19 +397,23 @@ class DetectionEngine:
             self.status = "UNDER_ATTACK"
             self.database.insert_alert(
                 "UNDER_ATTACK",
-                "Pre-attack warning",
-                "CPU spike and file modification burst indicate possible ransomware behavior.",
+                "Early Threat Detection",
+                (
+                    "Threshold-based early warning using behavioral anomalies "
+                    "such as CPU spikes and high file access rate."
+                ),
                 severity="medium",
             )
             self.log_event(
-                event="pre_attack_warning",
+                event="early_threat_detection",
                 action="flagged",
                 event_type="warning",
-                cpu_usage=cpu_percent,
+                cpu_usage=cpu_for_detection,
                 file_rate=files_per_second,
                 extra={
                     "modifications": modifications,
                     "accesses": accesses,
+                    "threat_confidence": confidence_percent,
                 },
             )
         elif not pre_attack_signal:
@@ -392,7 +426,7 @@ class DetectionEngine:
                 files_per_second=files_per_second,
                 modifications=modifications,
                 accesses=accesses,
-                cpu_percent=effective_cpu,
+                cpu_percent=cpu_for_detection,
                 suspicious_extension=suspicious_extension,
             )
         else:
@@ -402,7 +436,8 @@ class DetectionEngine:
             files_per_second=round(files_per_second, 2),
             modifications=modifications,
             accesses=accesses,
-            cpu_percent=round(effective_cpu, 2),
+            cpu_percent=round(cpu_for_detection, 2),
+            threat_confidence=confidence_percent,
             status=self.status if status == "SAFE" else status,
         )
         self.database.insert_metrics(
@@ -448,7 +483,7 @@ class DetectionEngine:
                 return None
             value = float((result.stdout or "").strip().splitlines()[-1])
             return max(0.0, min(100.0, value))
-        except Exception:
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             return None
 
     @staticmethod
@@ -516,7 +551,7 @@ class DetectionEngine:
         )
         if kill_result is not None:
             self.log_event(
-                event="process_killed",
+                event="active_threat_neutralization",
                 action="killed",
                 event_type="critical",
                 cpu_usage=cpu_percent,
@@ -531,7 +566,7 @@ class DetectionEngine:
             )
             self.database.insert_alert(
                 "UNDER_ATTACK",
-                "Suspicious process killed",
+                "Active Threat Neutralization",
                 f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
                 severity="high",
                 fingerprint_match=fingerprint["signature_hash"],
@@ -557,12 +592,13 @@ class DetectionEngine:
                 "process_terminated": bool(kill_result and kill_result.success),
                 "files_restored": len(restored),
                 "file_rate": round(files_per_second, 2),
+                "threat_confidence": self._threat_confidence,
             }
         )
 
         if restored:
             self.log_event(
-                event="files_restored",
+                event="automatic_system_recovery",
                 action="restored",
                 event_type="info",
                 cpu_usage=cpu_percent,
@@ -575,13 +611,13 @@ class DetectionEngine:
         self.status = "SAFE"
         self.database.insert_alert(
             "SAFE",
-            "Recovery completed",
-            "Files restored and monitoring returned to safe state.",
+            "System Safe",
+            "Automatic System Recovery completed and monitoring returned to safe state.",
             severity="medium",
             fingerprint_match=fingerprint["signature_hash"],
         )
         self.log_event(
-            event="recovery_completed",
+            event="system_safe",
             action="restored",
             event_type="info",
             cpu_usage=cpu_percent,
@@ -640,7 +676,7 @@ class DetectionEngine:
         # Adaptive rolling calibration stays stable across laptops and avoids per-request sampling jitter.
         try:
             live_cpu_raw, live_cpu_calibrated = self._display_cpu()
-        except Exception:
+        except (TypeError, ValueError, ZeroDivisionError):
             live_cpu_raw = self._last_cpu
             live_cpu_calibrated = self._last_cpu
 
@@ -648,6 +684,7 @@ class DetectionEngine:
         display_cpu = max(live_cpu_calibrated, metrics.cpu_percent)
         return {
             "status": self.status,
+            "confidence": self._threat_confidence,
             "is_monitoring": self.is_monitoring,
             "monitored_paths": [str(path) for path in self.monitored_paths],
             "metrics": {
@@ -657,6 +694,7 @@ class DetectionEngine:
                 "cpu_percent": round(display_cpu, 2),
                 "cpu_percent_raw": round(live_cpu_raw, 2),
                 "cpu_percent_sampled": metrics.cpu_percent,
+                "threat_confidence": metrics.threat_confidence,
                 "status": metrics.status,
             },
             "alerts": self.database.fetch_alerts(20),
