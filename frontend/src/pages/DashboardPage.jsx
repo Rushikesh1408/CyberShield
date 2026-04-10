@@ -17,6 +17,8 @@ const initialSnapshot = {
     modifications: 0,
     accesses: 0,
     cpu_percent: 0,
+    cpu_percent_raw: 0,
+    cpu_percent_sampled: 0,
     status: 'SAFE',
   },
   alerts: [],
@@ -45,6 +47,7 @@ async function fetchJson(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
+    cache: 'no-store',
   });
 
   if (!response.ok) {
@@ -104,6 +107,15 @@ export default function DashboardPage() {
   }, []);
 
   const isUnderAttack = snapshot.status === 'UNDER_ATTACK';
+  const toNumericValue = (value) => {
+    const numericValue = Number(value);
+    return Number.isNaN(numericValue) ? 0 : numericValue;
+  };
+  const cpuDisplayValue = Math.max(
+    toNumericValue(snapshot.metrics.cpu_percent),
+    toNumericValue(snapshot.metrics.cpu_percent_raw),
+    toNumericValue(snapshot.metrics.cpu_percent_sampled),
+  );
   const chartData = useMemo(() => history.slice(-20), [history]);
 
   const handleStart = async () => {
@@ -176,8 +188,8 @@ export default function DashboardPage() {
                 />
                 <StatusCard
                   title="CPU"
-                  value={`${snapshot.metrics.cpu_percent.toFixed(0)}%`}
-                  caption="Host CPU spike check"
+                  value={`${cpuDisplayValue.toFixed(1)}%`}
+                  caption="Task-Manager calibrated live reading"
                   accent={isUnderAttack ? 'rose' : 'green'}
                 />
                 <StatusCard
