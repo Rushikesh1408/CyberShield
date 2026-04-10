@@ -218,7 +218,14 @@ class DetectionEngine:
 
     def _sampling_loop(self) -> None:
         while not self._stop_event.wait(1.0):
-            self._sample()
+            try:
+                self._sample()
+            except Exception as error:
+                self.database.insert_log(
+                    "error",
+                    "Sampling loop error",
+                    metadata={"error": str(error)},
+                )
 
     def _run_initial_snapshot(self) -> None:
         try:
@@ -323,7 +330,12 @@ class DetectionEngine:
             access_times = self._trimmed(self._access_times, now, 5.0)
 
         cpu_percent = psutil.cpu_percent(interval=None)
-        self._last_cpu = cpu_percent
+        utility_cpu = self._read_windows_cpu_utility()
+        with self._lock:
+            cpu_for_detection = utility_cpu if utility_cpu is not None else cpu_percent
+            self._last_cpu = cpu_for_detection
+            self._cpu_history.append(cpu_for_detection)
+            self._windows_utility_cpu = utility_cpu
         files_per_second = float(len(event_times))
         modifications = len(modification_times)
         accesses = len(access_times)
@@ -380,7 +392,7 @@ class DetectionEngine:
                 files_per_second=files_per_second,
                 modifications=modifications,
                 accesses=accesses,
-                cpu_percent=cpu_percent,
+                cpu_percent=effective_cpu,
                 suspicious_extension=suspicious_extension,
             )
         else:
@@ -390,7 +402,7 @@ class DetectionEngine:
             files_per_second=round(files_per_second, 2),
             modifications=modifications,
             accesses=accesses,
-            cpu_percent=round(cpu_percent, 2),
+            cpu_percent=round(effective_cpu, 2),
             status=self.status if status == "SAFE" else status,
         )
         self.database.insert_metrics(
@@ -400,6 +412,44 @@ class DetectionEngine:
             self.metrics.cpu_percent,
             self.metrics.status,
         )
+
+    def _display_cpu(self) -> tuple[float, float]:
+        with self._lock:
+            history = list(self._cpu_history)
+            last_cpu = self._last_cpu
+            utility_cpu = self._windows_utility_cpu
+
+        if not history:
+            raw = utility_cpu if utility_cpu is not None else last_cpu
+            return raw, raw
+
+        raw = utility_cpu if utility_cpu is not None else history[-1]
+        rolling_average = sum(history) / len(history)
+        calibrated = (self._cpu_raw_blend * raw) + ((1.0 - self._cpu_raw_blend) * rolling_average)
+        calibrated = max(0.0, min(100.0, calibrated))
+        return raw, calibrated
+
+    def _read_windows_cpu_utility(self) -> float | None:
+        if os.name != "nt":
+            return None
+        try:
+            command = (
+                "(Get-Counter '\\Processor Information(_Total)\\% Processor Utility')."
+                "CounterSamples[0].CookedValue"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            value = float((result.stdout or "").strip().splitlines()[-1])
+            return max(0.0, min(100.0, value))
+        except Exception:
+            return None
 
     @staticmethod
     def _trimmed(entries: Deque[float], now: float, window: float) -> list[float]:
@@ -587,7 +637,15 @@ class DetectionEngine:
         return False
 
     def snapshot(self) -> dict[str, object]:
+        # Adaptive rolling calibration stays stable across laptops and avoids per-request sampling jitter.
+        try:
+            live_cpu_raw, live_cpu_calibrated = self._display_cpu()
+        except Exception:
+            live_cpu_raw = self._last_cpu
+            live_cpu_calibrated = self._last_cpu
+
         metrics = self.metrics
+        display_cpu = max(live_cpu_calibrated, metrics.cpu_percent)
         return {
             "status": self.status,
             "is_monitoring": self.is_monitoring,
@@ -596,7 +654,9 @@ class DetectionEngine:
                 "files_per_second": metrics.files_per_second,
                 "modifications": metrics.modifications,
                 "accesses": metrics.accesses,
-                "cpu_percent": metrics.cpu_percent,
+                "cpu_percent": round(display_cpu, 2),
+                "cpu_percent_raw": round(live_cpu_raw, 2),
+                "cpu_percent_sampled": metrics.cpu_percent,
                 "status": metrics.status,
             },
             "alerts": self.database.fetch_alerts(20),
