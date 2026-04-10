@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,16 @@ class KillResult:
     cmdline: str
     reason: str
     success: bool
+    error: str | None = None
+
+
+SUSPICIOUS_PATTERNS = [
+    re.compile(r"\bransom\w*\b"),
+    re.compile(r"\bencrypt\w*\b"),
+    re.compile(r"\blocker\w*\b"),
+    re.compile(r"\bmalware\w*\b"),
+    re.compile(r"\bcipher\w*\b"),
+]
 
 
 class ProcessKiller:
@@ -45,15 +56,8 @@ class ProcessKiller:
                 score += 2
                 reason_parts.append(f"cpu={cpu:.1f}")
 
-            suspicious_terms = [
-                "ransom",
-                "encrypt",
-                "locker",
-                "malware",
-                "cipher",
-                "lock",
-            ]
-            if any(term in name or term in cmdline for term in suspicious_terms):
+            scan_text = f"{name} {cmdline}"
+            if any(pattern.search(scan_text) for pattern in SUSPICIOUS_PATTERNS):
                 score += 3
                 reason_parts.append("suspicious_name")
 
@@ -95,9 +99,20 @@ class ProcessKiller:
         return best_process, best_reason
 
     def kill_process(self, process: psutil.Process, reason: str) -> KillResult:
-        name = process.name()
-        cmdline = " ".join(process.cmdline())
+        name = "<unknown>"
+        cmdline = ""
         success = False
+        error: str | None = None
+
+        try:
+            name = process.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            name = "<exited>"
+
+        try:
+            cmdline = " ".join(process.cmdline())
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            cmdline = ""
 
         try:
             process.terminate()
@@ -108,10 +123,11 @@ class ProcessKiller:
                 process.kill()
                 process.wait(timeout=2)
                 success = True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as ex:
             success = False
+            error = str(ex)
 
-        return KillResult(process.pid, name, cmdline, reason, success)
+        return KillResult(process.pid, name, cmdline, reason, success, error)
 
     def scan_and_kill(
         self,
@@ -132,14 +148,25 @@ class ProcessKiller:
         max_kills: int = 5,
         window_seconds: float = 3.0,
     ) -> list[KillResult]:
+        targets = list(target_paths)
         killed: list[KillResult] = []
         deadline = time.time() + max(0.5, float(window_seconds))
+        failure_count = 0
+        attempts = 0
+        max_attempts = max(3, int(max_kills) * 3)
 
-        while len(killed) < max(1, int(max_kills)) and time.time() < deadline:
-            result = self.scan_and_kill(target_paths, reason=reason)
+        while len(killed) < max(1, int(max_kills)) and time.time() < deadline and attempts < max_attempts:
+            attempts += 1
+            result = self.scan_and_kill(targets, reason=reason)
             if result is None:
                 break
             if result.success:
                 killed.append(result)
+                failure_count = 0
+            else:
+                failure_count += 1
+                time.sleep(0.1)
+                if failure_count >= 3:
+                    break
 
         return killed
