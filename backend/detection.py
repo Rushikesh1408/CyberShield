@@ -510,32 +510,72 @@ class DetectionEngine:
             },
         )
 
-        kill_result = self.process_killer.scan_and_kill(
+        # Enter containment mode immediately to minimize further attack-side file operations.
+        self._suppress_events_until = time.time() + 5.0
+        self.database.insert_alert(
+            "UNDER_ATTACK",
+            "Containment mode enabled",
+            "Immediate process containment started to stop further file operations.",
+            severity="critical",
+            fingerprint_match=fingerprint["signature_hash"],
+        )
+
+        kill_results = self.process_killer.scan_and_kill_many(
             self._target_paths(),
             reason="ransomware-like file activity",
+            max_kills=6,
+            window_seconds=3.0,
         )
-        if kill_result is not None:
-            self.log_event(
-                event="process_killed",
-                action="killed",
-                event_type="critical",
-                cpu_usage=cpu_percent,
-                file_rate=files_per_second,
-                extra={
-                    "process_name": kill_result.name,
-                    "pid": kill_result.pid,
-                    "cmdline": kill_result.cmdline,
-                    "reason": kill_result.reason,
-                    "success": kill_result.success,
-                },
+        if kill_results:
+            for kill_result in kill_results:
+                self.database.insert_log(
+                    "warning",
+                    "Suspicious process terminated",
+                    process_name=kill_result.name,
+                    metadata={
+                        "pid": kill_result.pid,
+                        "cmdline": kill_result.cmdline,
+                        "reason": kill_result.reason,
+                        "success": kill_result.success,
+                    },
+                )
+                self.database.insert_alert(
+                    "UNDER_ATTACK",
+                    "Suspicious process killed",
+                    f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
+                    severity="high",
+                    fingerprint_match=fingerprint["signature_hash"],
+                )
+        else:
+            kill_result = self.process_killer.scan_and_kill(
+                self._target_paths(),
+                reason="ransomware-like file activity",
             )
-            self.database.insert_alert(
-                "UNDER_ATTACK",
-                "Suspicious process killed",
-                f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
-                severity="high",
-                fingerprint_match=fingerprint["signature_hash"],
-            )
+            if kill_result is None:
+                self.database.insert_log(
+                    "warning",
+                    "Containment scan completed without a confident process kill",
+                    metadata={"target_paths": self._target_paths()},
+                )
+            else:
+                self.database.insert_log(
+                    "warning",
+                    "Suspicious process terminated",
+                    process_name=kill_result.name,
+                    metadata={
+                        "pid": kill_result.pid,
+                        "cmdline": kill_result.cmdline,
+                        "reason": kill_result.reason,
+                        "success": kill_result.success,
+                    },
+                )
+                self.database.insert_alert(
+                    "UNDER_ATTACK",
+                    "Suspicious process killed",
+                    f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
+                    severity="high",
+                    fingerprint_match=fingerprint["signature_hash"],
+                )
 
         restored = self.backup_manager.restore_many(
             self._restorable_paths(),
