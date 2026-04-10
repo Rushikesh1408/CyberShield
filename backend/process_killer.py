@@ -22,10 +22,9 @@ class KillResult:
 
 SUSPICIOUS_PATTERNS = [
     re.compile(r"\bransom\w*\b"),
-    re.compile(r"\bencrypt\w*\b"),
-    re.compile(r"\blocker\w*\b"),
+    re.compile(r"\bdecrypt(?:or|ion)?\b.*\b(?:your|files|data|key|payment)\b"),
+    re.compile(r"\b(?:lockbit|blackcat|alphv|akira|babuk|cl0p|phobos|ragnar|stop|medusa)\b"),
     re.compile(r"\bmalware\w*\b"),
-    re.compile(r"\bcipher\w*\b"),
 ]
 
 
@@ -58,7 +57,7 @@ class ProcessKiller:
 
             scan_text = f"{name} {cmdline}"
             if any(pattern.search(scan_text) for pattern in SUSPICIOUS_PATTERNS):
-                score += 3
+                score += 2
                 reason_parts.append("suspicious_name")
 
             touches_monitored_scope = False
@@ -149,19 +148,19 @@ class ProcessKiller:
         window_seconds: float = 3.0,
     ) -> list[KillResult]:
         targets = list(target_paths)
-        killed: list[KillResult] = []
+        results: list[KillResult] = []
         deadline = time.time() + max(0.5, float(window_seconds))
         failure_count = 0
         attempts = 0
         max_attempts = max(3, int(max_kills) * 3)
 
-        while len(killed) < max(1, int(max_kills)) and time.time() < deadline and attempts < max_attempts:
+        while len(results) < max(1, int(max_kills)) and time.time() < deadline and attempts < max_attempts:
             attempts += 1
             result = self.scan_and_kill(targets, reason=reason)
             if result is None:
                 break
+            results.append(result)
             if result.success:
-                killed.append(result)
                 failure_count = 0
             else:
                 failure_count += 1
@@ -169,4 +168,4 @@ class ProcessKiller:
                 if failure_count >= 3:
                     break
 
-        return killed
+        return results
