@@ -196,6 +196,11 @@ export default function DashboardPage() {
       });
 
       const graphHistory = (metricsData.history ?? []).map((entry) => ({
+        // Keep chart responsive to both short bursts and sustained file churn.
+        activity_signal: Math.max(
+          Number(entry.files_per_second ?? 0),
+          Number(entry.modifications ?? 0),
+        ),
         label: timeLabel(entry.timestamp),
         files_per_second: Number(entry.files_per_second ?? 0),
       }));
@@ -257,7 +262,13 @@ export default function DashboardPage() {
       : pipelineThreatLevel === 'MEDIUM'
         ? 'amber'
         : 'green';
-  const chartData = useMemo(() => history.slice(-20), [history]);
+  const chartData = useMemo(
+    () => history.slice(-120).map((entry) => ({
+      ...entry,
+      files_per_second: Number(entry.activity_signal ?? entry.files_per_second ?? 0),
+    })),
+    [history],
+  );
 
   const handleStart = async () => {
     setBusy(true);
@@ -433,7 +444,7 @@ export default function DashboardPage() {
                 ) : null}
               </div>
 
-              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <StatusCard
                   title="File Rate"
                   value={`${snapshot.metrics.files_per_second.toFixed(1)} /s`}
@@ -451,12 +462,6 @@ export default function DashboardPage() {
                   value={snapshot.metrics.modifications}
                   caption="Recent file write count"
                   accent="amber"
-                />
-                <StatusCard
-                  title="Alerts"
-                  value={snapshot.alerts.length}
-                  caption="Stored timeline entries"
-                  accent={isUnderAttack ? 'rose' : 'blue'}
                 />
                 <StatusCard
                   title="Threat Confidence"

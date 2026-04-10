@@ -42,9 +42,9 @@ def calculate_threat_score(
     dna_score = _clamp01(float(dna_mismatch_count) / float(safe_max_dna_mismatch))
 
     weighted_score = (
-        0.4 * file_activity_score
-        + 0.3 * cpu_score
-        + 0.3 * dna_score
+        0.6 * file_activity_score
+        + 0.15 * cpu_score
+        + 0.25 * dna_score
     )
     score = int(round(_clamp01(weighted_score) * 100.0))
     level = _threat_level(score)

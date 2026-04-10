@@ -54,7 +54,7 @@ export default function SystemTimelinePanel({ timeline }) {
         <h2 className="mt-2 text-xl font-semibold text-white">SAFE to SYSTEM_SAFE timeline</h2>
       </div>
 
-      <div className="relative mt-5 space-y-3 pl-5">
+      <div className="relative mt-5 max-h-[34rem] space-y-3 overflow-y-auto pl-5 pr-1">
         <div className="pointer-events-none absolute bottom-2 left-[9px] top-2 w-px bg-slate-700" />
         {entries.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/50 p-5 text-sm text-slate-400">
