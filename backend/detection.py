@@ -262,6 +262,20 @@ class DetectionEngine:
         restore_action = (
             "Files restored from backup" if int(data.get("files_restored", 0)) > 0 else "Files restore not needed"
         )
+        files_affected = int(data.get("files_affected", 0) or 0)
+        files_restored = int(data.get("files_restored", 0) or 0)
+        files_irrecoverable = int(
+            data.get("files_irrecoverable", max(files_affected - files_restored, 0)) or 0
+        )
+        if files_affected <= 0 or (files_restored >= files_affected and files_irrecoverable <= 0):
+            status_text = "✔ No data loss"
+        elif files_restored > 0:
+            status_text = (
+                f"⚠ Partial recovery ({files_restored}/{files_affected} files restored, "
+                f"{files_irrecoverable} unrecoverable)"
+            )
+        else:
+            status_text = f"✖ Recovery failed ({files_irrecoverable or files_affected} files unrecoverable)"
         report_text = (
             "--- CyberShield AI Attack Report ---\n\n"
             f"Time: {data.get('timestamp')}\n"
@@ -273,7 +287,7 @@ class DetectionEngine:
             f"{process_action}\n\n"
             f"{restore_action}\n\n"
             "Status:\n"
-            "✔ No data loss\n"
+            f"{status_text}\n"
         )
 
         self.report_file_path.write_text(report_text, encoding="utf-8")
@@ -599,7 +613,6 @@ class DetectionEngine:
                 "Containment process kill failed",
                 metadata={"error": str(error)},
             )
-            self._attack_active = False
         if kill_results:
             for kill_result in kill_results:
                 self.database.insert_log(
@@ -696,6 +709,7 @@ class DetectionEngine:
                 "process_name": kill_result.name if kill_result is not None else suspected_process_name,
                 "cpu_usage": round(cpu_percent, 2),
                 "files_affected": files_affected,
+                "files_irrecoverable": max(files_affected - len(restored), 0),
                 "process_terminated": bool(kill_result and kill_result.success),
                 "files_restored": len(restored),
                 "file_rate": round(files_per_second, 2),

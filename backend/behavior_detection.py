@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
+import os
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Deque
 
 
@@ -19,6 +21,29 @@ class FileEvent:
     event_type: str
     timestamp: float
     destination_path: Path | None = None
+
+
+class _LRUCache(OrderedDict[str, str]):
+    def __init__(self, *, maxsize: int = 10_000) -> None:
+        super().__init__()
+        self.maxsize = max(1, int(maxsize))
+
+    def __getitem__(self, key: str) -> str:
+        value = super().__getitem__(key)
+        super().move_to_end(key)
+        return value
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        if key not in self:
+            return default
+        return self[key]
+
+    def __setitem__(self, key: str, value: str) -> None:
+        if key in self:
+            super().__delitem__(key)
+        super().__setitem__(key, value)
+        while len(self) > self.maxsize:
+            self.popitem(last=False)
 
 
 class BehaviorDetector:
@@ -38,12 +63,18 @@ class BehaviorDetector:
         self._modification_times: Deque[float] = deque()
         self._process_touches: dict[int, Deque[float]] = defaultdict(deque)
         self._rename_times: Deque[float] = deque()
-        self._file_extensions: dict[str, str] = {}
+        self._file_extensions = _LRUCache(maxsize=10_000)
+        self._file_extensions_lock = Lock()
         self._last_event_time: float | None = None
 
     @staticmethod
     def _normalize_path(path: str | Path) -> str:
-        return str(Path(path).resolve()).lower()
+        candidate = Path(path)
+        try:
+            normalized = candidate.resolve()
+        except OSError:
+            normalized = candidate.expanduser().absolute()
+        return os.path.normcase(str(normalized))
 
     @staticmethod
     def _extension_for(path: Path) -> str:
@@ -51,14 +82,18 @@ class BehaviorDetector:
 
     def _trim_queue(self, queue: Deque[float], now: float) -> None:
         cutoff = now - self.modification_window_seconds
-        while queue and queue[0] < cutoff:
-            queue.popleft()
+        retained = deque(timestamp for timestamp in queue if timestamp >= cutoff)
+        queue.clear()
+        queue.extend(retained)
 
     def _trim_process_queue(self, process_id: int, now: float) -> None:
-        queue = self._process_touches[process_id]
+        queue = self._process_touches.get(process_id)
+        if queue is None:
+            return
         cutoff = now - self.modification_window_seconds
-        while queue and queue[0] < cutoff:
-            queue.popleft()
+        retained = deque(timestamp for timestamp in queue if timestamp >= cutoff)
+        queue.clear()
+        queue.extend(retained)
         if not queue:
             self._process_touches.pop(process_id, None)
 
@@ -86,27 +121,35 @@ class BehaviorDetector:
             self._process_touches[process_id].append(timestamp)
             self._trim_process_queue(process_id, timestamp)
 
+        did_count_rename = False
+
         if event_type in {"moved", "renamed"}:
             self._rename_times.append(timestamp)
             self._trim_queue(self._rename_times, timestamp)
+            did_count_rename = True
 
         current_extension = self._extension_for(resolved_path)
-        previous_extension = self._file_extensions.get(normalized_path)
-        if previous_extension is None:
-            self._file_extensions[normalized_path] = current_extension
-        elif previous_extension != current_extension:
-            self._rename_times.append(timestamp)
-            self._trim_queue(self._rename_times, timestamp)
-            self._file_extensions[normalized_path] = current_extension
+        with self._file_extensions_lock:
+            previous_extension = self._file_extensions.get(normalized_path)
+            if previous_extension is None:
+                self._file_extensions[normalized_path] = current_extension
+            elif previous_extension != current_extension:
+                if not did_count_rename:
+                    self._rename_times.append(timestamp)
+                    self._trim_queue(self._rename_times, timestamp)
+                    did_count_rename = True
+                self._file_extensions[normalized_path] = current_extension
 
         if destination is not None:
             destination_normalized = self._normalize_path(destination)
             destination_extension = self._extension_for(destination)
             source_extension = current_extension
-            if source_extension != destination_extension:
+            if source_extension != destination_extension and not did_count_rename:
                 self._rename_times.append(timestamp)
                 self._trim_queue(self._rename_times, timestamp)
-            self._file_extensions[destination_normalized] = destination_extension
+                did_count_rename = True
+            with self._file_extensions_lock:
+                self._file_extensions[destination_normalized] = destination_extension
 
         return self.evaluate(timestamp=timestamp)
 
