@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -122,3 +123,23 @@ class ProcessKiller:
         if process is None:
             return None
         return self.kill_process(process, f"{reason};{process_reason}")
+
+    def scan_and_kill_many(
+        self,
+        target_paths: Iterable[str],
+        *,
+        reason: str,
+        max_kills: int = 5,
+        window_seconds: float = 3.0,
+    ) -> list[KillResult]:
+        killed: list[KillResult] = []
+        deadline = time.time() + max(0.5, float(window_seconds))
+
+        while len(killed) < max(1, int(max_kills)) and time.time() < deadline:
+            result = self.scan_and_kill(target_paths, reason=reason)
+            if result is None:
+                break
+            if result.success:
+                killed.append(result)
+
+        return killed
