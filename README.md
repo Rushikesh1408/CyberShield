@@ -1,6 +1,13 @@
-# CyberShield - Real-Time Ransomware Defense & Zero Data Loss System
+# CyberShield - Ransomware Defense System
 
-CyberShield  is a lightweight ransomware defense tool for hackathon demos and local use. It automatically monitors protected system directories (Documents, Downloads, Desktop) or falls back to a local protected_folder, detects ransomware-like file bursts, kills suspicious processes, restores files from versioned backups, and stores attack fingerprints in SQLite.
+CyberShield is a lightweight ransomware defense tool for hackathon demos and local use. It automatically monitors protected system directories (Documents, Downloads, Desktop) or falls back to a local protected_folder, detects ransomware-like behavior in real time, neutralizes suspicious processes, restores data using versioned snapshots, and stores attack fingerprints in SQLite.
+
+Core engines include:
+
+- Early Threat Detection
+- Active Threat Neutralization
+- Versioned Snapshot System
+- Automatic System Recovery
 
 ## What is included
 

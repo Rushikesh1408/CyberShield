@@ -7,8 +7,10 @@ export default function StatusCard({ title, value, caption, accent = 'blue' }) {
   };
 
   return (
-    <div className={`rounded-2xl border bg-gradient-to-br p-5 shadow-glow ${accents[accent]}`}>
-      <div className="text-sm uppercase tracking-[0.26em] text-slate-300/80">{title}</div>
+    <div className={`overflow-hidden rounded-2xl border bg-gradient-to-br p-5 shadow-glow ${accents[accent]}`}>
+      <div className="max-w-full break-words text-xs uppercase leading-5 tracking-[0.16em] text-slate-300/80">
+        {title}
+      </div>
       <div className="mt-3 text-3xl font-semibold text-white">{value}</div>
       <div className="mt-2 text-sm text-slate-300">{caption}</div>
     </div>

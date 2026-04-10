@@ -1,20 +1,36 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import ActivityChart from '../components/ActivityChart';
+import AttackInsightsPanel from '../components/AttackInsightsPanel';
 import AlertsPanel from '../components/AlertsPanel';
 import BackupRecoveryPanel from '../components/BackupRecoveryPanel';
 import EmergencyPanel from '../components/EmergencyPanel';
 import FingerprintPanel from '../components/FingerprintPanel';
 import LogsTimeline from '../components/LogsTimeline';
 import StatusCard from '../components/StatusCard';
+import SystemTimelinePanel from '../components/SystemTimelinePanel';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
 
 const initialSnapshot = {
   status: 'SAFE',
+  confidence: 0,
   is_monitoring: false,
   monitor_paths: [],
   monitoring_message: 'Monitoring: Protected System Directories (Auto-configured)',
+  core_pipeline: {
+    is_running: false,
+    network_mode: 'safe',
+    threat: {
+      score: 0,
+      level: 'LOW',
+      trigger_threshold: 70,
+      metrics: {
+        tracked_files: 0,
+        dna_mismatch_count: 0,
+      },
+    },
+  },
   metrics: {
     files_per_second: 0,
     modifications: 0,
@@ -92,7 +108,41 @@ export default function DashboardPage() {
   const [isSavingContact, setIsSavingContact] = useState(false);
   const [isDownloadingReport, setIsDownloadingReport] = useState(false);
   const [emergencyMessage, setEmergencyMessage] = useState('');
+  const [attackSummary, setAttackSummary] = useState({
+    files_protected: 0,
+    files_encrypted: 0,
+    files_recovered: 0,
+    threat_confidence: 0,
+  });
+  const [fileStats, setFileStats] = useState({
+    files_protected: 0,
+    files_recovered: 0,
+  });
+  const [timeline, setTimeline] = useState([]);
   const [error, setError] = useState('');
+
+  const loadSystemIntelligence = async () => {
+    try {
+      const [summaryData, statsData, timelineData] = await Promise.all([
+        fetchJson('/api/attack/summary', {}, 6000),
+        fetchJson('/api/file-stats', {}, 6000),
+        fetchJson('/api/timeline', {}, 6000),
+      ]);
+      setAttackSummary({
+        files_protected: Number(summaryData.files_protected ?? 0),
+        files_encrypted: Number(summaryData.files_encrypted ?? 0),
+        files_recovered: Number(summaryData.files_recovered ?? 0),
+        threat_confidence: Number(summaryData.threat_confidence ?? 0),
+      });
+      setFileStats({
+        files_protected: Number(statsData.files_protected ?? 0),
+        files_recovered: Number(statsData.files_recovered ?? 0),
+      });
+      setTimeline(Array.isArray(timelineData.timeline) ? timelineData.timeline : []);
+    } catch {
+      // Do not block dashboard refresh when intelligence endpoints are briefly unavailable.
+    }
+  };
 
   const loadEmergencyContact = async () => {
     try {
@@ -132,11 +182,13 @@ export default function DashboardPage() {
 
       setSnapshot({
         status: statusData.status,
+        confidence: Number(statusData.confidence ?? 0),
         is_monitoring: Boolean(statusData.is_monitoring),
         monitor_paths: statusData.monitor_paths ?? [],
         monitoring_message:
           statusData.monitoring_message ??
           'Monitoring: Protected System Directories (Auto-configured)',
+        core_pipeline: statusData.core_pipeline ?? initialSnapshot.core_pipeline,
         metrics: metricsData.metrics ?? initialSnapshot.metrics,
         alerts: alertsData.alerts ?? [],
         logs: logsData.logs ?? [],
@@ -164,13 +216,16 @@ export default function DashboardPage() {
     loadSnapshot();
     loadBackupStatus();
     loadEmergencyContact();
+    loadSystemIntelligence();
 
     const snapshotInterval = window.setInterval(loadSnapshot, 2000);
     const backupInterval = window.setInterval(loadBackupStatus, 10000);
+    const intelligenceInterval = window.setInterval(loadSystemIntelligence, 4000);
 
     return () => {
       window.clearInterval(snapshotInterval);
       window.clearInterval(backupInterval);
+      window.clearInterval(intelligenceInterval);
     };
   }, []);
 
@@ -184,6 +239,24 @@ export default function DashboardPage() {
     toNumericValue(snapshot.metrics.cpu_percent_raw),
     toNumericValue(snapshot.metrics.cpu_percent_sampled),
   );
+  const threatConfidence = Math.max(
+    toNumericValue(snapshot.confidence),
+    toNumericValue(snapshot.metrics.threat_confidence),
+    toNumericValue(attackSummary.threat_confidence),
+  );
+  const pipelineState = snapshot.core_pipeline ?? initialSnapshot.core_pipeline;
+  const pipelineThreat = pipelineState.threat ?? initialSnapshot.core_pipeline.threat;
+  const pipelineThreatLevel = String(pipelineThreat.level ?? 'LOW').toUpperCase();
+  const pipelineThreatScore = toNumericValue(pipelineThreat.score);
+  const pipelineMode = String(pipelineState.network_mode ?? 'safe').toUpperCase();
+  const trackedFiles = toNumericValue(pipelineThreat.metrics?.tracked_files);
+  const dnaMismatchCount = toNumericValue(pipelineThreat.metrics?.dna_mismatch_count);
+  const pipelineAccent =
+    pipelineThreatLevel === 'HIGH'
+      ? 'rose'
+      : pipelineThreatLevel === 'MEDIUM'
+        ? 'amber'
+        : 'green';
   const chartData = useMemo(() => history.slice(-20), [history]);
 
   const handleStart = async () => {
@@ -229,9 +302,10 @@ export default function DashboardPage() {
     setIsRunningBackup(true);
     try {
       const response = await fetchJson('/api/backup/run', { method: 'POST' });
-      setBackupMessage(`Backup completed. Created versions: ${response.created ?? 0}`);
+      setBackupMessage(`Versioned snapshot completed. Created versions: ${response.created ?? 0}`);
       await loadSnapshot();
       await loadBackupStatus();
+      await loadSystemIntelligence();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -246,9 +320,10 @@ export default function DashboardPage() {
         method: 'POST',
         body: JSON.stringify({ file_path: filePath }),
       });
-      setBackupMessage(`Recovered file: ${filePath}`);
+      setBackupMessage(`Automatic System Recovery restored: ${filePath}`);
       await loadSnapshot();
       await loadBackupStatus();
+      await loadSystemIntelligence();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -310,7 +385,7 @@ export default function DashboardPage() {
       anchor.click();
       anchor.remove();
       window.URL.revokeObjectURL(downloadUrl);
-      setEmergencyMessage('Attack report downloaded.');
+      setEmergencyMessage('CyberShield attack report downloaded.');
       setError('');
     } catch (requestError) {
       const rawMessage = String(requestError.message ?? 'Failed to download report.');
@@ -330,15 +405,15 @@ export default function DashboardPage() {
           <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.4fr_0.8fr] lg:px-8 lg:py-8">
             <div>
               <div className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-4 py-1 text-xs uppercase tracking-[0.32em] text-sky-300">
-                CyberShield AI
+                CyberShield
               </div>
               <h1 className="mt-5 max-w-3xl text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-                Real-Time Ransomware Defense & Zero Data Loss System
+                CyberShield - Ransomware Defense System
               </h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-300">
-                Automatically monitor protected system directories, detect ransomware-like
-                bursts, kill suspicious processes, restore files from versioned backups, and
-                store reusable attack fingerprints.
+                Early Threat Detection, Active Threat Neutralization, Versioned Snapshot System,
+                and Automatic System Recovery in one lightweight local defense stack. Threshold-based
+                early warning using behavioral anomalies such as CPU spikes and high file access rate.
               </p>
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <span
@@ -358,7 +433,7 @@ export default function DashboardPage() {
                 ) : null}
               </div>
 
-              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                 <StatusCard
                   title="File Rate"
                   value={`${snapshot.metrics.files_per_second.toFixed(1)} /s`}
@@ -367,7 +442,7 @@ export default function DashboardPage() {
                 />
                 <StatusCard
                   title="CPU"
-                  value={`${snapshot.metrics.cpu_percent.toFixed(1)}%`}
+                  value={`${cpuDisplayValue.toFixed(1)}%`}
                   caption="Host CPU spike check"
                   accent={isUnderAttack ? 'rose' : 'green'}
                 />
@@ -383,15 +458,28 @@ export default function DashboardPage() {
                   caption="Stored timeline entries"
                   accent={isUnderAttack ? 'rose' : 'blue'}
                 />
+                <StatusCard
+                  title="Threat Confidence"
+                  value={`${Math.round(threatConfidence)}%`}
+                  caption="Behavioral certainty score"
+                  accent={isUnderAttack ? 'rose' : 'amber'}
+                />
+                <StatusCard
+                  title="Pipeline Level"
+                  value={pipelineThreatLevel}
+                  caption={`Score ${Math.round(pipelineThreatScore)}% • ${pipelineMode}`}
+                  accent={pipelineAccent}
+                />
               </div>
             </div>
 
             <div className="rounded-[1.75rem] border border-slate-800 bg-slate-900/70 p-5">
-              <div className="text-sm uppercase tracking-[0.26em] text-slate-400">Demo Controls</div>
+              <div className="text-sm uppercase tracking-[0.26em] text-slate-400">Protection Controls</div>
               <div className="mt-3 text-2xl font-semibold text-white">Auto protection loop</div>
               <p className="mt-2 text-sm leading-6 text-slate-300">
                 The engine automatically protects configured system directories. Launch a
-                ransomware simulation to see early detection, process kill, and recovery.
+                simulation to observe Early Threat Detection, Active Threat Neutralization,
+                and Automatic System Recovery.
               </p>
               <div className="mt-5 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-300">
                 {snapshot.monitoring_message}
@@ -429,6 +517,16 @@ export default function DashboardPage() {
                       : 'Protected folder fallback'}
                   </span>
                 </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span>Tracked Files</span>
+                  <span className="text-slate-300">{trackedFiles}</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span>DNA Mismatch Count</span>
+                  <span className={dnaMismatchCount > 0 ? 'text-amber-300' : 'text-slate-400'}>
+                    {dnaMismatchCount}
+                  </span>
+                </div>
                 <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs text-slate-400">
                   {snapshot.monitor_paths.length > 0
                     ? snapshot.monitor_paths.join(' | ')
@@ -447,6 +545,15 @@ export default function DashboardPage() {
         <section className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
           <ActivityChart data={chartData} />
           <AlertsPanel alerts={snapshot.alerts} />
+        </section>
+
+        <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+          <AttackInsightsPanel
+            confidence={threatConfidence}
+            attackSummary={attackSummary}
+            fileStats={fileStats}
+          />
+          <SystemTimelinePanel timeline={timeline} />
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
