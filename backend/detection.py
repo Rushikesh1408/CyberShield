@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 import time
 from collections import deque
@@ -70,7 +72,27 @@ class DetectionEngine:
         self._suppress_events_until = 0.0
         self._last_attack_at = 0.0
         self._last_cpu = 0.0
+        self._cpu_window = self._int_env("CYBERSHIELD_CPU_WINDOW", 4, minimum=3, maximum=60)
+        self._cpu_raw_blend = self._float_env("CYBERSHIELD_CPU_RAW_BLEND", 0.8, minimum=0.0, maximum=1.0)
+        self._cpu_history: Deque[float] = deque(maxlen=self._cpu_window)
+        self._windows_utility_cpu: float | None = None
         psutil.cpu_percent(interval=None)
+
+    @staticmethod
+    def _int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+        try:
+            value = int(os.environ.get(name, str(default)))
+        except ValueError:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
+        try:
+            value = float(os.environ.get(name, str(default)))
+        except ValueError:
+            value = default
+        return max(minimum, min(maximum, value))
 
     def start(self) -> None:
         handler = _EventHandler(self)
@@ -133,7 +155,14 @@ class DetectionEngine:
 
     def _sampling_loop(self) -> None:
         while not self._stop_event.wait(1.0):
-            self._sample()
+            try:
+                self._sample()
+            except Exception as error:
+                self.database.insert_log(
+                    "error",
+                    "Sampling loop error",
+                    metadata={"error": str(error)},
+                )
 
     def _sample(self) -> None:
         now = time.time()
@@ -143,7 +172,12 @@ class DetectionEngine:
             access_times = self._trimmed(self._access_times, now, 5.0)
 
         cpu_percent = psutil.cpu_percent(interval=None)
-        self._last_cpu = cpu_percent
+        utility_cpu = self._read_windows_cpu_utility()
+        with self._lock:
+            cpu_for_detection = utility_cpu if utility_cpu is not None else cpu_percent
+            self._last_cpu = cpu_for_detection
+            self._cpu_history.append(cpu_for_detection)
+            self._windows_utility_cpu = utility_cpu
         files_per_second = float(len(event_times))
         modifications = len(modification_times)
         accesses = len(access_times)
@@ -153,7 +187,8 @@ class DetectionEngine:
         rapid_modifications = files_per_second >= 4 or modifications >= 6
         suspicious_extension = bool(self._suspicious_paths)
         high_access_rate = accesses >= 10
-        cpu_spike = cpu_percent >= 70.0
+        effective_cpu = utility_cpu if utility_cpu is not None else cpu_percent
+        cpu_spike = effective_cpu >= 70.0
         early_signal = rapid_modifications and cpu_spike
 
         if rapid_modifications:
@@ -183,7 +218,7 @@ class DetectionEngine:
                     "files_per_second": files_per_second,
                     "modifications": modifications,
                     "accesses": accesses,
-                    "cpu_percent": cpu_percent,
+                    "cpu_percent": effective_cpu,
                 },
             )
         elif not early_signal:
@@ -196,7 +231,7 @@ class DetectionEngine:
                 files_per_second=files_per_second,
                 modifications=modifications,
                 accesses=accesses,
-                cpu_percent=cpu_percent,
+                cpu_percent=effective_cpu,
                 suspicious_extension=suspicious_extension,
             )
         else:
@@ -206,7 +241,7 @@ class DetectionEngine:
             files_per_second=round(files_per_second, 2),
             modifications=modifications,
             accesses=accesses,
-            cpu_percent=round(cpu_percent, 2),
+            cpu_percent=round(effective_cpu, 2),
             status=self.status if status == "SAFE" else status,
         )
         self.database.insert_metrics(
@@ -216,6 +251,44 @@ class DetectionEngine:
             self.metrics.cpu_percent,
             self.metrics.status,
         )
+
+    def _display_cpu(self) -> tuple[float, float]:
+        with self._lock:
+            history = list(self._cpu_history)
+            last_cpu = self._last_cpu
+            utility_cpu = self._windows_utility_cpu
+
+        if not history:
+            raw = utility_cpu if utility_cpu is not None else last_cpu
+            return raw, raw
+
+        raw = utility_cpu if utility_cpu is not None else history[-1]
+        rolling_average = sum(history) / len(history)
+        calibrated = (self._cpu_raw_blend * raw) + ((1.0 - self._cpu_raw_blend) * rolling_average)
+        calibrated = max(0.0, min(100.0, calibrated))
+        return raw, calibrated
+
+    def _read_windows_cpu_utility(self) -> float | None:
+        if os.name != "nt":
+            return None
+        try:
+            command = (
+                "(Get-Counter '\\Processor Information(_Total)\\% Processor Utility')."
+                "CounterSamples[0].CookedValue"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            value = float((result.stdout or "").strip().splitlines()[-1])
+            return max(0.0, min(100.0, value))
+        except Exception:
+            return None
 
     @staticmethod
     def _trimmed(entries: Deque[float], now: float, window: float) -> list[float]:
@@ -370,7 +443,15 @@ class DetectionEngine:
         return False
 
     def snapshot(self) -> dict[str, object]:
+        # Adaptive rolling calibration stays stable across laptops and avoids per-request sampling jitter.
+        try:
+            live_cpu_raw, live_cpu_calibrated = self._display_cpu()
+        except Exception:
+            live_cpu_raw = self._last_cpu
+            live_cpu_calibrated = self._last_cpu
+
         metrics = self.metrics
+        display_cpu = max(live_cpu_calibrated, metrics.cpu_percent)
         return {
             "status": self.status,
             "monitored_paths": [str(path) for path in self.monitored_paths],
@@ -378,7 +459,9 @@ class DetectionEngine:
                 "files_per_second": metrics.files_per_second,
                 "modifications": metrics.modifications,
                 "accesses": metrics.accesses,
-                "cpu_percent": metrics.cpu_percent,
+                "cpu_percent": round(display_cpu, 2),
+                "cpu_percent_raw": round(live_cpu_raw, 2),
+                "cpu_percent_sampled": metrics.cpu_percent,
                 "status": metrics.status,
             },
             "alerts": self.database.fetch_alerts(20),
