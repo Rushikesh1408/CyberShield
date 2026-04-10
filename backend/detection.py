@@ -520,12 +520,21 @@ class DetectionEngine:
             fingerprint_match=fingerprint["signature_hash"],
         )
 
-        kill_results = self.process_killer.scan_and_kill_many(
-            self._target_paths(),
-            reason="ransomware-like file activity",
-            max_kills=6,
-            window_seconds=3.0,
-        )
+        try:
+            kill_results = self.process_killer.scan_and_kill_many(
+                self._target_paths(),
+                reason="ransomware-like file activity",
+                max_kills=6,
+                window_seconds=3.0,
+            )
+        except Exception as error:
+            kill_results = []
+            self.database.insert_log(
+                "error",
+                "Containment process kill failed",
+                metadata={"error": str(error)},
+            )
+            self._attack_active = False
         if kill_results:
             for kill_result in kill_results:
                 self.database.insert_log(
@@ -537,15 +546,29 @@ class DetectionEngine:
                         "cmdline": kill_result.cmdline,
                         "reason": kill_result.reason,
                         "success": kill_result.success,
+                        "error": kill_result.error,
                     },
                 )
-                self.database.insert_alert(
-                    "UNDER_ATTACK",
-                    "Suspicious process killed",
-                    f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
-                    severity="high",
-                    fingerprint_match=fingerprint["signature_hash"],
-                )
+                if kill_result.success:
+                    self.database.insert_alert(
+                        "UNDER_ATTACK",
+                        "Suspicious process killed",
+                        f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
+                        severity="high",
+                        fingerprint_match=fingerprint["signature_hash"],
+                    )
+                else:
+                    failure_reason = kill_result.error or kill_result.reason
+                    self.database.insert_alert(
+                        "UNDER_ATTACK",
+                        "Failed to kill suspicious process",
+                        (
+                            f"Termination failed for process {kill_result.name} (PID {kill_result.pid}). "
+                            f"Reason: {failure_reason}."
+                        ),
+                        severity="critical",
+                        fingerprint_match=fingerprint["signature_hash"],
+                    )
         else:
             kill_result = self.process_killer.scan_and_kill(
                 self._target_paths(),
@@ -567,15 +590,29 @@ class DetectionEngine:
                         "cmdline": kill_result.cmdline,
                         "reason": kill_result.reason,
                         "success": kill_result.success,
+                        "error": kill_result.error,
                     },
                 )
-                self.database.insert_alert(
-                    "UNDER_ATTACK",
-                    "Suspicious process killed",
-                    f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
-                    severity="high",
-                    fingerprint_match=fingerprint["signature_hash"],
-                )
+                if kill_result.success:
+                    self.database.insert_alert(
+                        "UNDER_ATTACK",
+                        "Suspicious process killed",
+                        f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
+                        severity="high",
+                        fingerprint_match=fingerprint["signature_hash"],
+                    )
+                else:
+                    failure_reason = kill_result.error or kill_result.reason
+                    self.database.insert_alert(
+                        "UNDER_ATTACK",
+                        "Failed to kill suspicious process",
+                        (
+                            f"Termination failed for process {kill_result.name} (PID {kill_result.pid}). "
+                            f"Reason: {failure_reason}."
+                        ),
+                        severity="critical",
+                        fingerprint_match=fingerprint["signature_hash"],
+                    )
 
         restored = self.backup_manager.restore_many(
             self._restorable_paths(),
