@@ -47,6 +47,7 @@ export default function AttackInsightsPanel({ confidence, attackSummary, fileSta
   const protectedAnimated = useAnimatedNumber(Number(attackSummary.files_protected ?? 0), 700);
   const encryptedAnimated = useAnimatedNumber(Number(attackSummary.files_encrypted ?? 0), 700);
   const recoveredAnimated = useAnimatedNumber(Number(attackSummary.files_recovered ?? 0), 700);
+  const honeytrapAnimated = useAnimatedNumber(Number(attackSummary.honeytrap_triggers ?? 0), 700);
 
   const protectedStatsAnimated = useAnimatedNumber(Number(fileStats.files_protected ?? 0), 650);
   const recoveredStatsAnimated = useAnimatedNumber(Number(fileStats.files_recovered ?? 0), 650);
@@ -73,7 +74,7 @@ export default function AttackInsightsPanel({ confidence, attackSummary, fileSta
         </div>
       </div>
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-3">
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Files Protected"
           value={protectedAnimated}
@@ -88,6 +89,11 @@ export default function AttackInsightsPanel({ confidence, attackSummary, fileSta
           label="Files Recovered"
           value={recoveredAnimated}
           accent="border-sky-400/25 bg-sky-500/10"
+        />
+        <StatCard
+          label="Honeytrap Triggered"
+          value={honeytrapAnimated}
+          accent="border-fuchsia-400/25 bg-fuchsia-500/10"
         />
       </div>
 

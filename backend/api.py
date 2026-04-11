@@ -7,10 +7,11 @@ import time
 import json
 import smtplib
 import sqlite3
+from collections import deque
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, Deque
 import urllib.error
 import urllib.request
 
@@ -20,11 +21,13 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from backend.config import AppConfig
     from backend.core import CyberShieldPipeline
+    from backend.core import isolate_network
     from backend.database import Database
     from backend.fingerprint import FingerprintManager
 else:
     from .config import AppConfig
     from .core import CyberShieldPipeline
+    from .core import isolate_network
     from .database import Database
     from .fingerprint import FingerprintManager
 
@@ -59,6 +62,11 @@ COMMAND_CENTER_SYSTEM_ENV = "CYBERSHIELD_COMMAND_CENTER_SYSTEM"
 SMS_TIMEOUT_SECONDS = 8
 SAFE_CONFIRMATION_CYCLES = 6
 ALERT_DISPATCH_COOLDOWN_SECONDS = 180
+HONEYTRAP_ENABLED_ENV = "CYBERSHIELD_HONEYTRAP_ENABLED"
+HONEYTRAP_BURST_THRESHOLD_ENV = "CYBERSHIELD_HONEYTRAP_BURST_THRESHOLD"
+HONEYTRAP_BURST_WINDOW_ENV = "CYBERSHIELD_HONEYTRAP_BURST_WINDOW_SECONDS"
+HONEYTRAP_AUTO_ISOLATE_ENV = "CYBERSHIELD_HONEYTRAP_AUTO_ISOLATE"
+HONEYTRAP_ISOLATION_MODE_ENV = "CYBERSHIELD_HONEYTRAP_ISOLATION_MODE"
 
 
 def _existing_directories(candidates: list[Path]) -> list[Path]:
@@ -265,6 +273,26 @@ class SystemController:
         self._command_center_alert_skip_logged_for_attack = False
         self._last_command_center_dispatch_at: float | None = None
         self._simulation_lock = threading.Lock()
+        self._honeytrap_enabled = _read_bool_env(HONEYTRAP_ENABLED_ENV, True)
+        self._honeytrap_burst_threshold = max(1, _read_int_env(HONEYTRAP_BURST_THRESHOLD_ENV, 3))
+        self._honeytrap_burst_window_seconds = max(
+            1.0,
+            float(_read_int_env(HONEYTRAP_BURST_WINDOW_ENV, 8)),
+        )
+        self._honeytrap_auto_isolate = _read_bool_env(HONEYTRAP_AUTO_ISOLATE_ENV, False)
+        configured_honeytrap_mode = str(
+            os.environ.get(HONEYTRAP_ISOLATION_MODE_ENV, "safe") or "safe"
+        ).strip().lower()
+        self._honeytrap_isolation_mode = (
+            configured_honeytrap_mode if configured_honeytrap_mode in {"safe", "aggressive"} else "safe"
+        )
+        self._honeytrap_paths: set[str] = set()
+        self._honeytrap_activity: Deque[float] = deque(maxlen=128)
+        self._honeytrap_hits = 0
+        self._last_honeytrap_trigger_at = 0.0
+        self._honeytrap_lock = threading.Lock()
+        if self._honeytrap_enabled:
+            self._honeytrap_paths = self._seed_honeytrap_files()
         self._start_engine()
 
     def _simulation_target_directory(self) -> Path:
@@ -298,6 +326,204 @@ class SystemController:
                 continue
 
         return seeded
+
+    @staticmethod
+    def _path_key(path_value: str | Path) -> str:
+        return str(Path(path_value).resolve()).lower()
+
+    def _seed_honeytrap_files(self) -> set[str]:
+        decoy_templates: dict[str, dict[str, str]] = {
+            "finance": {
+                "quarterly_budget_2026.xlsx": (
+                    "Department,Planned Budget\nEngineering,1420000\nOperations,980000\n"
+                ),
+            },
+            "passwords": {
+                "credential_vault_backup.txt": (
+                    "service,username,password\nmail,secops@example.com,NotARealPassword\n"
+                ),
+            },
+            "hr": {
+                "employee_compensation_2026.csv": (
+                    "employee_id,name,base_salary\nE-1024,Alex Rivera,128000\n"
+                ),
+            },
+        }
+
+        seeded_paths: set[str] = set()
+        for monitored_root in self.protected_directories:
+            root = Path(monitored_root).resolve()
+            for folder_name, files in decoy_templates.items():
+                folder_path = root / folder_name
+                try:
+                    folder_path.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    continue
+
+                for file_name, content in files.items():
+                    file_path = folder_path / file_name
+                    try:
+                        if not file_path.exists():
+                            file_path.write_text(content, encoding="utf-8")
+                        seeded_paths.add(self._path_key(file_path))
+                    except OSError:
+                        continue
+
+        return seeded_paths
+
+    def _handle_honeytrap_event(self, payload: dict[str, Any]) -> None:
+        if not self._honeytrap_enabled:
+            return
+
+        action = str(payload.get("action") or "").lower()
+        file_path = str(payload.get("file") or "").strip()
+        if action not in {"created", "modified", "deleted"} or not file_path:
+            return
+
+        file_key = self._path_key(file_path)
+        if file_key not in self._honeytrap_paths:
+            return
+
+        now = time.time()
+        with self._honeytrap_lock:
+            self._honeytrap_activity.append(now)
+            while self._honeytrap_activity and (
+                self._honeytrap_activity[0] < now - self._honeytrap_burst_window_seconds
+            ):
+                self._honeytrap_activity.popleft()
+            burst_count = len(self._honeytrap_activity)
+            recently_triggered = (now - self._last_honeytrap_trigger_at) < self._honeytrap_burst_window_seconds
+
+        if burst_count < self._honeytrap_burst_threshold or recently_triggered:
+            return
+
+        with self._honeytrap_lock:
+            self._last_honeytrap_trigger_at = now
+            self._honeytrap_hits += 1
+            trigger_count = self._honeytrap_hits
+
+        self.database.insert_alert(
+            "UNDER_ATTACK",
+            "Honeytrap Triggered",
+            (
+                "Decoy file burst activity detected in monitored path "
+                f"({Path(file_path).name}, {burst_count} events)."
+            ),
+            severity="critical",
+        )
+        self.database.log_event(
+            {
+                "event": "honeytrap_triggered",
+                "event_type": "critical",
+                "action": "flagged",
+                "file_name": Path(file_path).name,
+                "file_path": file_path,
+                "cpu_usage": 0.0,
+                "file_rate": float(burst_count),
+                "honeytrap_hits": trigger_count,
+                "burst_count": burst_count,
+                "burst_window_seconds": self._honeytrap_burst_window_seconds,
+            }
+        )
+
+        if self._honeytrap_auto_isolate:
+            isolation_result = isolate_network(mode=self._honeytrap_isolation_mode)
+            isolated = bool(isolation_result.get("isolated"))
+            self.database.log_event(
+                {
+                    "event": "active_threat_neutralization",
+                    "event_type": "critical",
+                    "action": "isolated" if isolated else "attempted",
+                    "file_name": Path(file_path).name,
+                    "file_path": file_path,
+                    "cpu_usage": 0.0,
+                    "file_rate": float(burst_count),
+                    "mode": str(isolation_result.get("mode") or self._honeytrap_isolation_mode),
+                    "isolated": isolated,
+                    "simulated": bool(isolation_result.get("simulated")),
+                    "reason": "honeytrap_triggered",
+                }
+            )
+
+        self._send_honeytrap_emergency_alert(file_path=file_path, burst_count=burst_count)
+
+    def _send_honeytrap_emergency_alert(self, *, file_path: str, burst_count: int) -> None:
+        emergency_email = self.get_emergency_contact().strip()
+        if not emergency_email:
+            self.database.log_event(
+                {
+                    "event": "emergency_alert_skipped",
+                    "event_type": "warning",
+                    "action": "none",
+                    "file_name": Path(file_path).name,
+                    "file_path": file_path,
+                    "cpu_usage": 0.0,
+                    "file_rate": float(burst_count),
+                    "reason": "contact_not_configured",
+                    "source": "honeytrap",
+                }
+            )
+            return
+
+        alert_timestamp = datetime.now(timezone.utc).isoformat()
+        subject = "CyberShield Alert: Honeytrap Triggered"
+        body = (
+            "CyberShield Emergency Alert\n\n"
+            "A decoy file/folder honeytrap was triggered in the monitored path.\n"
+            f"File: {file_path}\n"
+            f"Burst events: {burst_count}\n"
+            f"Time: {alert_timestamp}\n"
+        )
+        sent, provider_response = self._send_email_alert(
+            to_email=emergency_email,
+            subject=subject,
+            body=body,
+        )
+
+        if sent:
+            self.database.insert_alert(
+                "UNDER_ATTACK",
+                "Emergency Email Sent",
+                "Emergency alert email sent immediately after honeytrap trigger.",
+                severity="critical",
+            )
+            self.database.log_event(
+                {
+                    "event": "emergency_alert_sent",
+                    "event_type": "critical",
+                    "action": "none",
+                    "file_name": Path(file_path).name,
+                    "file_path": file_path,
+                    "cpu_usage": 0.0,
+                    "file_rate": float(burst_count),
+                    "email": emergency_email,
+                    "provider": "smtp",
+                    "source": "honeytrap",
+                }
+            )
+            return
+
+        self.database.insert_alert(
+            "UNDER_ATTACK",
+            "Emergency Email Failed",
+            "Honeytrap alert email delivery failed. Check SMTP environment configuration.",
+            severity="high",
+        )
+        self.database.log_event(
+            {
+                "event": "emergency_alert_failed",
+                "event_type": "warning",
+                "action": "none",
+                "file_name": Path(file_path).name,
+                "file_path": file_path,
+                "cpu_usage": 0.0,
+                "file_rate": float(burst_count),
+                "email": emergency_email,
+                "provider": "smtp",
+                "error": provider_response,
+                "source": "honeytrap",
+            }
+        )
 
     def _run_simulation_activity(self, *, target: Path, level: str) -> dict[str, Any]:
         seeded_files = self._seed_simulation_files(target)
@@ -416,6 +642,7 @@ class SystemController:
             threat_score_trigger=max(1, _read_int_env(TRIGGER_THRESHOLD_ENV, default_trigger_threshold)),
             max_file_activity=max(1, _read_int_env(MAX_FILE_ACTIVITY_ENV, default_max_file_activity)),
             max_dna_mismatch=max(1, _read_int_env(MAX_DNA_MISMATCH_ENV, default_max_dna_mismatch)),
+            on_monitor_event=self._handle_honeytrap_event,
         )
         self.pipeline.start()
         self._pipeline_stop_event.clear()
@@ -1159,6 +1386,8 @@ class SystemController:
             return self.snapshot()
 
         self.protected_directories = discover_protected_directories()
+        if self._honeytrap_enabled:
+            self._honeytrap_paths = self._seed_honeytrap_files()
         self._pipeline_stop_event.set()
         if self._pipeline_thread is not None and self._pipeline_thread.is_alive():
             self._pipeline_thread.join(timeout=3)
@@ -1333,6 +1562,11 @@ class SystemController:
                 "fingerprints": [],
                 "monitored_paths": [str(path) for path in self.protected_directories],
                 "core_pipeline": None,
+                "honeytrap": {
+                    "enabled": self._honeytrap_enabled,
+                    "decoy_files": len(self._honeytrap_paths),
+                    "hits": self._honeytrap_hits,
+                },
             }
         else:
             pipeline_state = self.pipeline.status()
@@ -1364,6 +1598,11 @@ class SystemController:
                 "fingerprints": self.database.fetch_fingerprints(),
                 "monitored_paths": [str(path) for path in self.protected_directories],
                 "core_pipeline": pipeline_state,
+                "honeytrap": {
+                    "enabled": self._honeytrap_enabled,
+                    "decoy_files": len(self._honeytrap_paths),
+                    "hits": self._honeytrap_hits,
+                },
             }
 
         payload["monitor_paths"] = [str(path) for path in self.protected_directories]
@@ -1402,10 +1641,13 @@ class SystemController:
         files_encrypted = 0
         files_recovered = stats["files_recovered"]
         threat_confidence = self._to_int(self.snapshot().get("confidence", 0))
+        honeytrap_triggers = 0
 
         for log in self.database.fetch_logs(500):
             event = str(log.get("event") or "")
             metadata = log.get("metadata") if isinstance(log.get("metadata"), dict) else {}
+            if event == "honeytrap_triggered":
+                honeytrap_triggers += 1
             if event == "attack_report_generated":
                 files_encrypted = self._to_int(metadata.get("files_affected"))
                 files_recovered = self._to_int(metadata.get("files_recovered")) or files_recovered
@@ -1419,6 +1661,7 @@ class SystemController:
             "files_encrypted": files_encrypted,
             "files_recovered": files_recovered,
             "threat_confidence": threat_confidence,
+            "honeytrap_triggers": honeytrap_triggers,
         }
 
     def timeline(self) -> list[dict[str, str]]:
@@ -1436,6 +1679,11 @@ class SystemController:
             "attack_detected": (
                 "ATTACK_DETECTED",
                 "Behavioral attack pattern confirmed",
+                "critical",
+            ),
+            "honeytrap_triggered": (
+                "HONEYTRAP_TRIGGERED",
+                "Decoy files/folders were hit in burst activity",
                 "critical",
             ),
             "active_threat_neutralization": (
@@ -1544,6 +1792,7 @@ def register_routes(flask_app: Flask) -> None:
                 "backup_root": data["backup_root"],
                 "metrics": data["metrics"],
                 "core_pipeline": data.get("core_pipeline"),
+                "honeytrap": data.get("honeytrap"),
             }
         )
 

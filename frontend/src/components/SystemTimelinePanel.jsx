@@ -44,14 +44,29 @@ function toneForSeverity(severity) {
   }
 }
 
-export default function SystemTimelinePanel({ timeline }) {
+export default function SystemTimelinePanel({
+  timeline,
+  onClearTimeline,
+  isClearingTimeline = false,
+}) {
   const entries = Array.isArray(timeline) ? timeline : [];
+  const canClear = typeof onClearTimeline === 'function' && entries.length > 1;
 
   return (
     <section className="rounded-3xl border border-slate-700/70 bg-slate-950/70 p-5 shadow-glow">
-      <div>
-        <div className="text-sm uppercase tracking-[0.26em] text-sky-300/80">System Lifecycle</div>
-        <h2 className="mt-2 text-xl font-semibold text-white">SAFE to SYSTEM_SAFE timeline</h2>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm uppercase tracking-[0.26em] text-sky-300/80">System Lifecycle</div>
+          <h2 className="mt-2 text-xl font-semibold text-white">SAFE to SYSTEM_SAFE timeline</h2>
+        </div>
+        <button
+          type="button"
+          onClick={onClearTimeline}
+          disabled={!canClear || isClearingTimeline}
+          className="rounded-xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isClearingTimeline ? 'Clearing...' : 'Clear Timeline'}
+        </button>
       </div>
 
       <div className="relative mt-5 max-h-[34rem] space-y-3 overflow-y-auto pl-5 pr-1">
