@@ -12,6 +12,21 @@ import SystemTimelinePanel from '../components/SystemTimelinePanel';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
 
+function joinApiUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const normalizedBase = String(API_BASE || '').replace(/\/$/, '');
+
+  if (!normalizedBase) {
+    return normalizedPath;
+  }
+
+  if (normalizedBase.endsWith('/api') && normalizedPath.startsWith('/api/')) {
+    return `${normalizedBase}${normalizedPath.slice(4)}`;
+  }
+
+  return `${normalizedBase}${normalizedPath}`;
+}
+
 const initialSnapshot = {
   status: 'SAFE',
   confidence: 0,
@@ -72,7 +87,7 @@ async function fetchJson(path, options = {}, timeoutMs = 8000) {
     headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(joinApiUrl(path), {
     headers,
     ...options,
     signal: controller.signal,
@@ -81,7 +96,16 @@ async function fetchJson(path, options = {}, timeoutMs = 8000) {
   window.clearTimeout(timeoutId);
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let message = `Request failed: ${response.status}`;
+    try {
+      const payload = await response.json();
+      if (payload && typeof payload.message === 'string' && payload.message.trim()) {
+        message = payload.message;
+      }
+    } catch {
+      // Keep default error text when backend response is not JSON.
+    }
+    throw new Error(message);
   }
 
   return response.json();
@@ -107,6 +131,7 @@ export default function DashboardPage() {
   const [emergencyContact, setEmergencyContact] = useState('');
   const [isSavingContact, setIsSavingContact] = useState(false);
   const [isDownloadingReport, setIsDownloadingReport] = useState(false);
+  const [isSimulating, setIsSimulating] = useState(false);
   const [emergencyMessage, setEmergencyMessage] = useState('');
   const [attackSummary, setAttackSummary] = useState({
     files_protected: 0,
@@ -296,6 +321,39 @@ export default function DashboardPage() {
     }
   };
 
+  const handleRunAttackSimulation = async () => {
+    setIsSimulating(true);
+    try {
+      const response = await fetchJson(
+        '/api/simulate/attack',
+        {
+          method: 'POST',
+          body: JSON.stringify({ level: 'high', wait_timeout: 30 }),
+        },
+        45000,
+      );
+
+      const summary = response.attack_summary ?? {};
+      const encrypted = Number(summary.files_encrypted ?? 0);
+      const recovered = Number(summary.files_recovered ?? 0);
+      const reportReady = Boolean(response.report_ready);
+
+      setEmergencyMessage(
+        reportReady
+          ? `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report generated.`
+          : `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report still pending.`,
+      );
+      setError('');
+      await loadSnapshot();
+      await loadBackupStatus();
+      await loadSystemIntelligence();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
   const handleClearLogs = async () => {
     setClearingLogs(true);
     try {
@@ -343,9 +401,9 @@ export default function DashboardPage() {
   };
 
   const handleSaveEmergencyContact = async () => {
-    const phone = emergencyContact.trim();
-    if (!phone) {
-      setEmergencyMessage('Please enter a phone number before saving.');
+    const email = emergencyContact.trim();
+    if (!email) {
+      setEmergencyMessage('Please enter an email address before saving.');
       return;
     }
 
@@ -353,10 +411,10 @@ export default function DashboardPage() {
     try {
       const response = await fetchJson('/api/emergency/contact', {
         method: 'POST',
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({ email }),
       });
-      setEmergencyContact(String(response.contact ?? phone));
-      setEmergencyMessage('Emergency contact saved successfully.');
+      setEmergencyContact(String(response.contact ?? email));
+      setEmergencyMessage('Emergency email contact saved successfully.');
       setError('');
     } catch (requestError) {
       setError(requestError.message);
@@ -370,7 +428,7 @@ export default function DashboardPage() {
     try {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 8000);
-      const response = await fetch(`${API_BASE}/api/report/download`, {
+      const response = await fetch(joinApiUrl('/api/report/download'), {
         method: 'GET',
         signal: controller.signal,
       });
@@ -492,7 +550,7 @@ export default function DashboardPage() {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || isSimulating}
                   onClick={handleStart}
                   className="rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
                 >
@@ -500,13 +558,21 @@ export default function DashboardPage() {
                 </button>
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || isSimulating}
                   onClick={handleStop}
                   className="rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Stop Monitoring
                 </button>
               </div>
+              <button
+                type="button"
+                disabled={busy || isSimulating}
+                onClick={handleRunAttackSimulation}
+                className="mt-3 w-full rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/70 disabled:text-slate-500"
+              >
+                {isSimulating ? 'Running Simulation...' : 'Run Attack Simulation'}
+              </button>
               <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-sm text-slate-300">
                 <div className="flex items-center justify-between gap-3">
                   <span>Status</span>

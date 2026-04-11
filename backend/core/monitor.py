@@ -125,6 +125,11 @@ class RealTimeMonitor:
             event_counter = int(self._event_counter)
             cpu_usage = round(self._last_cpu, 2)
             active_processes = self._active_processes
+            last_event_at = self._recent_events[-1].timestamp if self._recent_events else 0.0
+
+        idle_seconds = float(now - last_event_at) if last_event_at else float(now)
+        if idle_seconds < 0.0:
+            idle_seconds = 0.0
 
         return {
             "watch_paths": [str(path) for path in self.watch_paths],
@@ -134,6 +139,8 @@ class RealTimeMonitor:
             "file_activity_total": event_counter,
             "cpu_usage": cpu_usage,
             "active_processes": active_processes,
+            "last_event_at": last_event_at,
+            "idle_seconds": idle_seconds,
             "events": recent_events,
         }
 

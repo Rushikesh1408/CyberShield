@@ -30,12 +30,14 @@ def calculate_threat_score(
     file_activity_count: int,
     cpu_usage: float,
     dna_mismatch_count: int,
+    idle_seconds: float = 0.0,
     max_file_activity: int = 200,
     max_dna_mismatch: int = 20,
 ) -> dict[str, int | str]:
     """Compute weighted ransomware threat score in the range 0-100."""
     safe_max_file_activity = max(1, int(max_file_activity))
     safe_max_dna_mismatch = max(1, int(max_dna_mismatch))
+    idle_seconds = max(0.0, float(idle_seconds))
 
     file_activity_score = _clamp01(float(file_activity_count) / float(safe_max_file_activity))
     cpu_score = _clamp01(float(cpu_usage) / 100.0)
@@ -46,6 +48,13 @@ def calculate_threat_score(
         + 0.15 * cpu_score
         + 0.25 * dna_score
     )
+    idle_decay_factor = 1.0
+    if idle_seconds >= 240.0:
+        idle_decay_factor = 0.0
+    elif idle_seconds > 0.0:
+        idle_decay_factor = max(0.0, 1.0 - (idle_seconds / 240.0))
+    weighted_score *= idle_decay_factor
+
     score = int(round(_clamp01(weighted_score) * 100.0))
     level = _threat_level(score)
 

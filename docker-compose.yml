@@ -1,0 +1,68 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cybershield-backend
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5000
+      FLASK_DEBUG: 0
+      FLASK_RELOADER: 0
+      CYBERSHIELD_MONITOR_PATHS: ${CYBERSHIELD_MONITOR_PATHS:-/app/protected_folder}
+      CYBERSHIELD_COMMAND_CENTER_BASE_URL: ${CYBERSHIELD_COMMAND_CENTER_BASE_URL:-}
+      CYBERSHIELD_COMMAND_CENTER_API_KEY: ${CYBERSHIELD_COMMAND_CENTER_API_KEY:-}
+      CYBERSHIELD_COMMAND_CENTER_SOURCE: ${CYBERSHIELD_COMMAND_CENTER_SOURCE:-cybershield-engine}
+      CYBERSHIELD_COMMAND_CENTER_LOCATION: ${CYBERSHIELD_COMMAND_CENTER_LOCATION:-local-endpoint}
+      CYBERSHIELD_COMMAND_CENTER_SYSTEM: ${CYBERSHIELD_COMMAND_CENTER_SYSTEM:-CyberShield Protected Filesystem}
+      MAIL_SERVER: ${MAIL_SERVER:-${CYBERSHIELD_SMTP_HOST:-smtp.gmail.com}}
+      MAIL_PORT: ${MAIL_PORT:-${CYBERSHIELD_SMTP_PORT:-587}}
+      MAIL_USERNAME: ${MAIL_USERNAME:-${CYBERSHIELD_SMTP_USERNAME:-}}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-${CYBERSHIELD_SMTP_PASSWORD:-}}
+      MAIL_DEFAULT_SENDER: ${MAIL_DEFAULT_SENDER:-${CYBERSHIELD_SMTP_FROM_EMAIL:-}}
+      MAIL_USE_TLS: ${MAIL_USE_TLS:-${CYBERSHIELD_SMTP_USE_TLS:-true}}
+      MAIL_USE_SSL: ${MAIL_USE_SSL:-false}
+    volumes:
+      - ./data:/app/data
+      - ./backup:/app/backup
+      - ${CYBERSHIELD_HOST_MONITOR_PATH:-./protected_folder}:/app/protected_folder
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    container_name: cybershield-frontend
+    depends_on:
+      - backend
+    ports:
+      - "${CYBERSHIELD_FRONTEND_PORT:-5173}:80"
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cybershield-tunnel
+    depends_on:
+      - frontend
+    command: tunnel --no-autoupdate --url http://frontend:80
+    restart: unless-stopped
+    profiles:
+      - tunnel
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: cybershield-ngrok
+    depends_on:
+      - frontend
+    command:
+      - "http"
+      - "frontend:80"
+      - "--authtoken=${NGROK_AUTHTOKEN}"
+      - "--log=stdout"
+    restart: unless-stopped
+    profiles:
+      - ngrok
