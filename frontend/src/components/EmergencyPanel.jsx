@@ -19,14 +19,14 @@ export default function EmergencyPanel({
       <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
         <div className="text-sm uppercase tracking-[0.24em] text-slate-400">Emergency Contact</div>
         <p className="mt-2 text-sm text-slate-300">
-          Save the emergency phone number that receives critical ransomware alert notifications.
+          Save the emergency email address that receives critical ransomware alert notifications.
         </p>
 
         <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto]">
           <input
             value={emergencyContact}
             onChange={(event) => onEmergencyContactChange(event.target.value)}
-            placeholder="+91 9876543210"
+            placeholder="security-team@example.com"
             className="rounded-xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-200 outline-none transition placeholder:text-slate-500 focus:border-rose-400"
           />
           <button

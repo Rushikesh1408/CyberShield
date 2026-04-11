@@ -351,6 +351,7 @@ class CyberShieldPipeline:
             file_activity_count=int(monitor_snapshot.get("file_activity_count", 0)),
             cpu_usage=float(monitor_snapshot.get("cpu_usage", 0.0)),
             dna_mismatch_count=int(dna_mismatch_count),
+            idle_seconds=float(monitor_snapshot.get("idle_seconds") or 0.0),
             max_file_activity=self.max_file_activity,
             max_dna_mismatch=self.max_dna_mismatch,
         )
@@ -361,7 +362,7 @@ class CyberShieldPipeline:
 
         try:
             dna, _ = self.dna_store.generate_if_modified(path)
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError, OSError):
             return None
 
         key = str(path.resolve())
@@ -388,7 +389,7 @@ class CyberShieldPipeline:
 
         try:
             current_dna, updated = self.dna_store.generate_if_modified(path)
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError, OSError):
             return
 
         with self._lock:
@@ -399,4 +400,8 @@ class CyberShieldPipeline:
             self._dna_baseline[key] = current_dna
 
         force_snapshot = action == "created"
-        self.snapshot_manager.create_snapshot(path, force=force_snapshot)
+        try:
+            self.snapshot_manager.create_snapshot(path, force=force_snapshot)
+        except (PermissionError, OSError):
+            # File locks are expected during active incidents; keep monitor thread alive.
+            return

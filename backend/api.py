@@ -4,12 +4,14 @@ import os
 import sys
 import threading
 import time
-import base64
+import json
+import smtplib
+import sqlite3
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 import urllib.error
-import urllib.parse
 import urllib.request
 
 from flask import Flask, jsonify, request, send_file
@@ -36,10 +38,27 @@ MONITOR_PATHS_ENV = "CYBERSHIELD_MONITOR_PATHS"
 TRIGGER_THRESHOLD_ENV = "CYBERSHIELD_TRIGGER_THRESHOLD"
 MAX_FILE_ACTIVITY_ENV = "CYBERSHIELD_MAX_FILE_ACTIVITY"
 MAX_DNA_MISMATCH_ENV = "CYBERSHIELD_MAX_DNA_MISMATCH"
-TWILIO_ACCOUNT_SID_ENV = "CYBERSHIELD_TWILIO_ACCOUNT_SID"
-TWILIO_AUTH_TOKEN_ENV = "CYBERSHIELD_TWILIO_AUTH_TOKEN"
-TWILIO_FROM_NUMBER_ENV = "CYBERSHIELD_TWILIO_FROM_NUMBER"
+SMTP_HOST_ENV = "CYBERSHIELD_SMTP_HOST"
+SMTP_PORT_ENV = "CYBERSHIELD_SMTP_PORT"
+SMTP_USERNAME_ENV = "CYBERSHIELD_SMTP_USERNAME"
+SMTP_PASSWORD_ENV = "CYBERSHIELD_SMTP_PASSWORD"
+SMTP_FROM_EMAIL_ENV = "CYBERSHIELD_SMTP_FROM_EMAIL"
+SMTP_USE_TLS_ENV = "CYBERSHIELD_SMTP_USE_TLS"
+MAIL_SERVER_ENV = "MAIL_SERVER"
+MAIL_PORT_ENV = "MAIL_PORT"
+MAIL_USERNAME_ENV = "MAIL_USERNAME"
+MAIL_PASSWORD_ENV = "MAIL_PASSWORD"
+MAIL_DEFAULT_SENDER_ENV = "MAIL_DEFAULT_SENDER"
+MAIL_USE_TLS_ENV = "MAIL_USE_TLS"
+MAIL_USE_SSL_ENV = "MAIL_USE_SSL"
+COMMAND_CENTER_BASE_URL_ENV = "CYBERSHIELD_COMMAND_CENTER_BASE_URL"
+COMMAND_CENTER_API_KEY_ENV = "CYBERSHIELD_COMMAND_CENTER_API_KEY"
+COMMAND_CENTER_SOURCE_ENV = "CYBERSHIELD_COMMAND_CENTER_SOURCE"
+COMMAND_CENTER_LOCATION_ENV = "CYBERSHIELD_COMMAND_CENTER_LOCATION"
+COMMAND_CENTER_SYSTEM_ENV = "CYBERSHIELD_COMMAND_CENTER_SYSTEM"
 SMS_TIMEOUT_SECONDS = 8
+SAFE_CONFIRMATION_CYCLES = 6
+ALERT_DISPATCH_COOLDOWN_SECONDS = 180
 
 
 def _existing_directories(candidates: list[Path]) -> list[Path]:
@@ -58,11 +77,68 @@ def _existing_directories(candidates: list[Path]) -> list[Path]:
 
 
 def _normalize_contact_value(value: str) -> str:
-    compact = "".join(ch for ch in str(value or "") if ch.isdigit() or ch == "+")
-    if compact.startswith("+"):
-        digits = "".join(ch for ch in compact[1:] if ch.isdigit())
-        return f"+{digits}" if digits else ""
-    return "".join(ch for ch in compact if ch.isdigit())
+    return str(value or "").strip().lower()
+
+
+def _is_valid_email(value: str) -> bool:
+    email = str(value or "").strip()
+    if not email or " " in email:
+        return False
+    if email.count("@") != 1:
+        return False
+    local, domain = email.split("@", 1)
+    return bool(local and domain and "." in domain and not domain.startswith("."))
+
+
+def _is_user_visible_restored_file(path_value: str) -> bool:
+    candidate = str(path_value or "").strip()
+    if not candidate:
+        return False
+
+    path = Path(candidate)
+    lower_name = path.name.lower()
+
+    # Encrypted artifacts and CyberShield internal probe files should not be
+    # counted in user-facing recovery totals.
+    if lower_name.endswith(".enc"):
+        return False
+    if lower_name.startswith(".cybershield"):
+        return False
+
+    return True
+
+
+def _count_user_visible_files_in_directories(directories: list[Path]) -> int:
+    seen: set[str] = set()
+    for directory in directories:
+        try:
+            resolved_directory = Path(directory).resolve()
+        except OSError:
+            continue
+
+        if not resolved_directory.exists() or not resolved_directory.is_dir():
+            continue
+
+        def _walk_error(_error: OSError) -> None:
+            return
+
+        for root, _, files in os.walk(resolved_directory, onerror=_walk_error):
+            root_path = Path(root)
+            for file_name in files:
+                file_path = root_path / file_name
+                if not _is_user_visible_restored_file(str(file_path)):
+                    continue
+
+                try:
+                    key = str(file_path.resolve()).lower()
+                except OSError:
+                    continue
+
+                if key in seen:
+                    continue
+                seen.add(key)
+
+    return len(seen)
 
 
 def _configured_monitor_directories() -> list[Path]:
@@ -89,6 +165,66 @@ def _read_int_env(name: str, default: int) -> int:
         return int(raw_value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _read_bool_env(name: str, default: bool = False) -> bool:
+    raw_value = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw_value:
+        return bool(default)
+    return raw_value not in {"0", "false", "no", "off"}
+
+
+def _read_email_config() -> dict[str, str | int | bool]:
+    smtp_host = str(os.environ.get(SMTP_HOST_ENV, "") or "").strip()
+    smtp_port_raw = str(os.environ.get(SMTP_PORT_ENV, "") or "").strip()
+    smtp_username = str(os.environ.get(SMTP_USERNAME_ENV, "") or "").strip()
+    smtp_password = str(os.environ.get(SMTP_PASSWORD_ENV, "") or "").strip()
+    smtp_from_email = str(os.environ.get(SMTP_FROM_EMAIL_ENV, "") or "").strip()
+    smtp_use_tls = _read_bool_env(SMTP_USE_TLS_ENV, True)
+    smtp_use_ssl = False
+
+    mail_server = str(os.environ.get(MAIL_SERVER_ENV, "") or "").strip()
+    mail_port_raw = str(os.environ.get(MAIL_PORT_ENV, "") or "").strip()
+    mail_username = str(os.environ.get(MAIL_USERNAME_ENV, "") or "").strip()
+    mail_password = str(os.environ.get(MAIL_PASSWORD_ENV, "") or "").strip()
+    mail_default_sender = str(os.environ.get(MAIL_DEFAULT_SENDER_ENV, "") or "").strip()
+    mail_use_tls = _read_bool_env(MAIL_USE_TLS_ENV, True)
+    mail_use_ssl = _read_bool_env(MAIL_USE_SSL_ENV, False)
+
+    if mail_server:
+        smtp_host = smtp_host or mail_server
+    if mail_port_raw:
+        smtp_port_raw = smtp_port_raw or mail_port_raw
+    if mail_username:
+        smtp_username = smtp_username or mail_username
+    if mail_password:
+        smtp_password = smtp_password or mail_password
+    if mail_default_sender:
+        smtp_from_email = smtp_from_email or mail_default_sender
+    if mail_use_tls:
+        smtp_use_tls = True
+    if mail_use_ssl:
+        smtp_use_ssl = True
+
+    if not smtp_host and smtp_username:
+        smtp_host = "smtp.gmail.com"
+    if not smtp_port_raw and smtp_username:
+        smtp_port_raw = "587"
+
+    if not smtp_host:
+        smtp_host = "smtp.gmail.com"
+    if not smtp_port_raw:
+        smtp_port_raw = "587"
+
+    return {
+        "host": smtp_host,
+        "port": int(smtp_port_raw),
+        "username": smtp_username,
+        "password": smtp_password,
+        "from_email": smtp_from_email,
+        "use_tls": smtp_use_tls,
+        "use_ssl": smtp_use_ssl,
+    }
 
 
 def discover_protected_directories() -> list[Path]:
@@ -120,10 +256,152 @@ class SystemController:
         self._pipeline_stop_event = threading.Event()
         self._attack_active = False
         self._warning_active = False
+        self._safe_cycle_streak = 0
         self._last_recovery_count = 0
         self._emergency_alert_sent_for_attack = False
         self._emergency_alert_skip_logged_for_attack = False
+        self._last_emergency_dispatch_at: float | None = None
+        self._command_center_alert_sent_for_attack = False
+        self._command_center_alert_skip_logged_for_attack = False
+        self._last_command_center_dispatch_at: float | None = None
+        self._simulation_lock = threading.Lock()
         self._start_engine()
+
+    def _simulation_target_directory(self) -> Path:
+        for path in self.protected_directories:
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                return path
+            except OSError:
+                continue
+
+        FALLBACK_PROTECTED_FOLDER.mkdir(parents=True, exist_ok=True)
+        return FALLBACK_PROTECTED_FOLDER.resolve()
+
+    def _seed_simulation_files(self, target: Path) -> list[Path]:
+        target.mkdir(parents=True, exist_ok=True)
+        seeded: list[Path] = []
+        templates = {
+            "report.pdf": b"%PDF-1.4\n% CyberShield Simulation\n",
+            "notes.txt": b"CyberShield simulation baseline\n",
+            "invoice.docx": b"PK\x03\x04CyberShield-Demo\n",
+            "photo.jpg": b"\xff\xd8\xff\xe0CyberShield\xff\xd9",
+        }
+
+        for file_name, payload in templates.items():
+            file_path = target / file_name
+            try:
+                if not file_path.exists():
+                    file_path.write_bytes(payload)
+                seeded.append(file_path)
+            except OSError:
+                continue
+
+        return seeded
+
+    def _run_simulation_activity(self, *, target: Path, level: str) -> dict[str, Any]:
+        seeded_files = self._seed_simulation_files(target)
+        files_for_activity = [
+            path
+            for path in seeded_files
+            if path.exists() and path.is_file() and not path.name.endswith(".enc")
+        ]
+
+        level_key = str(level or "high").strip().lower()
+        if level_key not in {"low", "medium", "high"}:
+            raise ValueError("invalid_level")
+
+        write_rounds = {"low": 2, "medium": 6, "high": 12}[level_key]
+        rename_ratio = {"low": 0.0, "medium": 0.5, "high": 1.0}[level_key]
+        burst_iterations = {"low": 120, "medium": 320, "high": 900}[level_key]
+
+        touched_count = 0
+        for _ in range(write_rounds):
+            for file_path in files_for_activity:
+                try:
+                    with file_path.open("ab") as handle:
+                        handle.write(
+                            f"mutation:{time.time():.6f}:{file_path.name}\n".encode("utf-8")
+                        )
+                    touched_count += 1
+                except OSError:
+                    continue
+
+        renamed_count = 0
+        renamed_files: list[str] = []
+        if files_for_activity and rename_ratio > 0.0:
+            rename_limit = max(1, int(len(files_for_activity) * rename_ratio))
+            for file_path in files_for_activity[:rename_limit]:
+                encrypted_path = file_path.with_name(f"{file_path.name}.enc")
+                try:
+                    if encrypted_path.exists():
+                        encrypted_path.unlink()
+                    file_path.rename(encrypted_path)
+                    renamed_count += 1
+                    renamed_files.append(str(encrypted_path))
+                except OSError:
+                    continue
+
+        burst_events = 0
+        burst_prefix = f".cybershield_sim_{int(time.time() * 1000)}"
+        for index in range(burst_iterations):
+            probe = target / f"{burst_prefix}_{index}.tmp"
+            try:
+                probe.write_text(f"burst {index}\n", encoding="utf-8")
+                with probe.open("a", encoding="utf-8") as handle:
+                    handle.write(f"tick {time.time():.6f}\n")
+                probe.unlink(missing_ok=True)
+                burst_events += 3
+            except OSError:
+                continue
+
+        return {
+            "level": level_key,
+            "target": str(target),
+            "seeded_files": [str(path) for path in seeded_files],
+            "touched_count": touched_count,
+            "renamed_count": renamed_count,
+            "renamed_files": renamed_files,
+            "burst_events": burst_events,
+        }
+
+    def run_attack_simulation(self, *, level: str, wait_timeout: int) -> dict[str, Any]:
+        if not self._simulation_lock.acquire(blocking=False):
+            raise RuntimeError("simulation_in_progress")
+
+        try:
+            if self.pipeline is None or not self.pipeline.monitor.is_running:
+                self.restart()
+
+            self.run_backup()
+            target = self._simulation_target_directory()
+            simulation_result = self._run_simulation_activity(target=target, level=level)
+
+            timeout_seconds = max(5, min(180, int(wait_timeout)))
+            deadline = time.time() + timeout_seconds
+            attack_seen = False
+            report_ready = ATTACK_REPORT_PATH.exists()
+
+            while time.time() < deadline:
+                snapshot = self.snapshot()
+                if str(snapshot.get("status") or "") == "UNDER_ATTACK":
+                    attack_seen = True
+                if ATTACK_REPORT_PATH.exists():
+                    report_ready = True
+                    break
+                time.sleep(1.0)
+
+            summary = self.attack_summary()
+            return {
+                "message": "simulation_triggered",
+                "simulation": simulation_result,
+                "attack_detected": bool(attack_seen or summary.get("files_encrypted", 0) > 0),
+                "report_ready": bool(report_ready),
+                "attack_summary": summary,
+                "monitor_paths": [str(path) for path in self.protected_directories],
+            }
+        finally:
+            self._simulation_lock.release()
 
     def _start_engine(self) -> None:
         using_custom_monitor_paths = bool(str(os.environ.get(MONITOR_PATHS_ENV, "") or "").strip())
@@ -168,12 +446,16 @@ class SystemController:
             try:
                 assessment = self.pipeline.run_cycle()
                 self._record_pipeline_cycle(assessment)
-            except (RuntimeError, ValueError, OSError) as error:
-                self.database.insert_log(
-                    "error",
-                    "pipeline_cycle_failed",
-                    metadata={"error": str(error)},
-                )
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                try:
+                    self.database.insert_log(
+                        "error",
+                        "pipeline_cycle_failed",
+                        metadata={"error": str(error)},
+                    )
+                except (OSError, sqlite3.Error):
+                    # Keep the control loop alive even when database writes are unavailable.
+                    pass
 
     def _record_pipeline_cycle(self, assessment: dict[str, Any]) -> None:
         metrics = assessment.get("metrics") if isinstance(assessment.get("metrics"), dict) else {}
@@ -190,13 +472,17 @@ class SystemController:
         dna_mismatch_count = self._to_int(metrics.get("dna_mismatch_count"))
 
         status = "UNDER_ATTACK" if triggered else "SAFE"
-        self.database.insert_metrics(
-            files_per_second,
-            activity_count,
-            activity_count,
-            cpu_usage,
-            status,
-        )
+        try:
+            self.database.insert_metrics(
+                files_per_second,
+                activity_count,
+                activity_count,
+                cpu_usage,
+                status,
+            )
+        except (OSError, sqlite3.Error):
+            # Continue threat handling even if metric persistence is temporarily unavailable.
+            pass
 
         if score >= warning_threshold:
             if not self._warning_active:
@@ -228,10 +514,13 @@ class SystemController:
             self._warning_active = False
 
         if triggered:
+            self._safe_cycle_streak = 0
             if not self._attack_active:
                 self._attack_active = True
                 self._emergency_alert_sent_for_attack = False
                 self._emergency_alert_skip_logged_for_attack = False
+                self._command_center_alert_sent_for_attack = False
+                self._command_center_alert_skip_logged_for_attack = False
                 self.database.insert_alert(
                     "UNDER_ATTACK",
                     "Behavioral attack pattern confirmed",
@@ -331,13 +620,29 @@ class SystemController:
                 cpu_usage=cpu_usage,
                 file_rate=files_per_second,
             )
+            self._send_command_center_alert_once(
+                assessment_timestamp=assessment_timestamp,
+                score=score,
+                level=level,
+                cpu_usage=cpu_usage,
+                file_rate=files_per_second,
+                files_affected=activity_count,
+                dna_mismatch_count=dna_mismatch_count,
+            )
             return
 
         if self._attack_active:
+            self._safe_cycle_streak += 1
+            if self._safe_cycle_streak < SAFE_CONFIRMATION_CYCLES:
+                return
+
             self._attack_active = False
+            self._safe_cycle_streak = 0
             self._last_recovery_count = 0
             self._emergency_alert_sent_for_attack = False
             self._emergency_alert_skip_logged_for_attack = False
+            self._command_center_alert_sent_for_attack = False
+            self._command_center_alert_skip_logged_for_attack = False
             self.database.insert_alert(
                 "SAFE",
                 "System Safe",
@@ -429,36 +734,194 @@ class SystemController:
             fingerprint_match=str(similar.get("signature_hash") or ""),
         )
 
-    def _send_sms_via_twilio(self, *, phone: str, message: str) -> tuple[bool, str]:
-        account_sid = str(os.environ.get(TWILIO_ACCOUNT_SID_ENV, "") or "").strip()
-        auth_token = str(os.environ.get(TWILIO_AUTH_TOKEN_ENV, "") or "").strip()
-        from_number = str(os.environ.get(TWILIO_FROM_NUMBER_ENV, "") or "").strip()
+    def _send_email_alert(self, *, to_email: str, subject: str, body: str) -> tuple[bool, str]:
+        email_config = _read_email_config()
+        smtp_host = str(email_config["host"])
+        smtp_port = int(email_config["port"])
+        smtp_username = str(email_config["username"])
+        smtp_password = str(email_config["password"])
+        from_email = str(email_config["from_email"])
+        use_tls = bool(email_config["use_tls"])
+        use_ssl = bool(email_config["use_ssl"])
 
-        if not account_sid or not auth_token or not from_number:
-            return False, "twilio_not_configured"
+        if not smtp_host or not from_email:
+            return False, "smtp_not_configured"
 
-        endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
-        form = urllib.parse.urlencode({"To": phone, "From": from_number, "Body": message}).encode(
-            "utf-8"
-        )
-        request_obj = urllib.request.Request(endpoint, data=form, method="POST")
-        basic_token = base64.b64encode(f"{account_sid}:{auth_token}".encode("utf-8")).decode("ascii")
-        request_obj.add_header("Authorization", f"Basic {basic_token}")
-        request_obj.add_header("Content-Type", "application/x-www-form-urlencoded")
+        message = EmailMessage()
+        message["From"] = from_email
+        message["To"] = to_email
+        message["Subject"] = subject
+        message.set_content(body)
+
+        try:
+            smtp_client = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+            with smtp_client(smtp_host, smtp_port, timeout=SMS_TIMEOUT_SECONDS) as client:
+                if use_tls:
+                    client.starttls()
+                if smtp_username and smtp_password:
+                    client.login(smtp_username, smtp_password)
+                client.send_message(message)
+        except (smtplib.SMTPException, TimeoutError, OSError) as error:
+            return False, f"smtp_error:{error}"
+
+        return True, "email_sent"
+
+    @staticmethod
+    def _score_to_command_center_severity(score: int) -> str:
+        if score >= 85:
+            return "critical"
+        if score >= 70:
+            return "high"
+        if score >= 50:
+            return "medium"
+        return "low"
+
+    def _send_to_command_center(self, payload: dict[str, Any]) -> tuple[bool, str]:
+        base_url = str(os.environ.get(COMMAND_CENTER_BASE_URL_ENV, "") or "").strip().rstrip("/")
+        api_key = str(os.environ.get(COMMAND_CENTER_API_KEY_ENV, "") or "").strip()
+        if not base_url or not api_key:
+            return False, "command_center_not_configured"
+
+        endpoint = f"{base_url}/integrations/cybershield/events"
+        body = json.dumps(payload).encode("utf-8")
+        request_obj = urllib.request.Request(endpoint, data=body, method="POST")
+        request_obj.add_header("Content-Type", "application/json")
+        request_obj.add_header("x-api-key", api_key)
 
         try:
             with urllib.request.urlopen(request_obj, timeout=SMS_TIMEOUT_SECONDS) as response:
                 status_code = int(getattr(response, "status", 0) or 0)
-                payload = response.read().decode("utf-8", errors="replace")
+                response_payload = response.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as error:
-            payload = error.read().decode("utf-8", errors="replace")
-            return False, f"twilio_http_{error.code}:{payload[:180]}"
+            response_payload = error.read().decode("utf-8", errors="replace")
+            return False, f"command_center_http_{error.code}:{response_payload[:180]}"
         except (urllib.error.URLError, TimeoutError, OSError) as error:
-            return False, f"twilio_error:{error}"
+            return False, f"command_center_error:{error}"
 
         if 200 <= status_code < 300:
-            return True, payload[:180]
-        return False, f"twilio_http_{status_code}:{payload[:180]}"
+            return True, response_payload[:180]
+        return False, f"command_center_http_{status_code}:{response_payload[:180]}"
+
+    def _send_command_center_alert_once(
+        self,
+        *,
+        assessment_timestamp: float,
+        score: int,
+        level: str,
+        cpu_usage: float,
+        file_rate: float,
+        files_affected: int,
+        dna_mismatch_count: int,
+    ) -> None:
+        if self._command_center_alert_sent_for_attack:
+            return
+
+        now = time.time()
+        if (
+            self._last_command_center_dispatch_at is not None
+            and (now - self._last_command_center_dispatch_at) < ALERT_DISPATCH_COOLDOWN_SECONDS
+        ):
+            return
+
+        base_url = str(os.environ.get(COMMAND_CENTER_BASE_URL_ENV, "") or "").strip().rstrip("/")
+        api_key = str(os.environ.get(COMMAND_CENTER_API_KEY_ENV, "") or "").strip()
+        if not base_url or not api_key:
+            if self._command_center_alert_skip_logged_for_attack:
+                return
+
+            self._command_center_alert_skip_logged_for_attack = True
+            self.database.log_event(
+                {
+                    "event": "command_center_alert_skipped",
+                    "event_type": "warning",
+                    "action": "none",
+                    "file_name": "",
+                    "file_path": "",
+                    "cpu_usage": cpu_usage,
+                    "file_rate": file_rate,
+                    "reason": "command_center_not_configured",
+                    "threat_confidence": score,
+                    "threat_level": level,
+                }
+            )
+            return
+
+        source = str(os.environ.get(COMMAND_CENTER_SOURCE_ENV, "") or "").strip() or "cybershield-engine"
+        location = str(os.environ.get(COMMAND_CENTER_LOCATION_ENV, "") or "").strip() or "local-endpoint"
+        system_name = (
+            str(os.environ.get(COMMAND_CENTER_SYSTEM_ENV, "") or "").strip()
+            or "CyberShield Protected Filesystem"
+        )
+        first_seen = datetime.fromtimestamp(float(assessment_timestamp), tz=timezone.utc).isoformat()
+        payload = {
+            "type": "ransomware_activity",
+            "threat_score": max(0, min(100, int(score))),
+            "severity": self._score_to_command_center_severity(int(score)),
+            "message": (
+                "CyberShield detected ransomware-like behavior and initiated "
+                "Active Threat Neutralization + Automatic System Recovery."
+            ),
+            "source_info": {
+                "gateway": source,
+                "ip": None,
+                "location": location,
+            },
+            "timeline": {
+                "first_seen": first_seen,
+                "duration": "ongoing",
+            },
+            "impact": {
+                "system": system_name,
+                "risk_level": str(level).upper(),
+            },
+            "ai_insight": (
+                f"Threat score reached {int(score)} with sustained anomalous file activity. "
+                "Automated containment and restore workflow triggered."
+            ),
+            "metadata": {
+                "files_affected": int(files_affected),
+                "file_rate": float(file_rate),
+                "cpu_usage": float(cpu_usage),
+                "dna_mismatch_count": int(dna_mismatch_count),
+                "ingest_source": "cybershield-local-engine",
+            },
+        }
+
+        # Guard against repeated dispatches when threat state oscillates rapidly.
+        self._last_command_center_dispatch_at = now
+        sent, provider_response = self._send_to_command_center(payload)
+
+        # One outbound command-center event attempt per attack cycle.
+        self._command_center_alert_sent_for_attack = True
+
+        if sent:
+            self.database.log_event(
+                {
+                    "event": "command_center_alert_sent",
+                    "event_type": "info",
+                    "action": "none",
+                    "file_name": "",
+                    "file_path": "",
+                    "cpu_usage": cpu_usage,
+                    "file_rate": file_rate,
+                    "destination": f"{base_url}/integrations/cybershield/events",
+                }
+            )
+            return
+
+        self.database.log_event(
+            {
+                "event": "command_center_alert_failed",
+                "event_type": "warning",
+                "action": "none",
+                "file_name": "",
+                "file_path": "",
+                "cpu_usage": cpu_usage,
+                "file_rate": file_rate,
+                "destination": f"{base_url}/integrations/cybershield/events",
+                "error": provider_response,
+            }
+        )
 
     def _send_emergency_alert_once(
         self,
@@ -472,8 +935,15 @@ class SystemController:
         if self._emergency_alert_sent_for_attack:
             return
 
-        emergency_phone = self.get_emergency_contact().strip()
-        if not emergency_phone:
+        now = time.time()
+        if (
+            self._last_emergency_dispatch_at is not None
+            and (now - self._last_emergency_dispatch_at) < ALERT_DISPATCH_COOLDOWN_SECONDS
+        ):
+            return
+
+        emergency_email = self.get_emergency_contact().strip()
+        if not emergency_email:
             if self._emergency_alert_skip_logged_for_attack:
                 return
 
@@ -495,17 +965,24 @@ class SystemController:
             return
 
         alert_timestamp = datetime.fromtimestamp(float(assessment_timestamp), tz=timezone.utc).isoformat()
+        alert_subject = f"CyberShield Alert: {str(level).upper()} ransomware activity"
         alert_message = (
-            "CyberShield Emergency Alert\n"
-            f"Threat: {level} ({score}%)\n"
+            "CyberShield Emergency Alert\n\n"
+            f"Threat Level: {str(level).upper()}\n"
+            f"Threat Confidence: {int(score)}%\n"
+            f"CPU Usage: {round(float(cpu_usage), 2)}%\n"
+            f"File Activity Rate: {round(float(file_rate), 2)} /s\n"
             "Ransomware attack behavior detected.\n"
             "Active Threat Neutralization + Automatic System Recovery triggered.\n"
-            f"Time: {alert_timestamp}"
+            f"Time: {alert_timestamp}\n"
         )
 
-        sent, provider_response = self._send_sms_via_twilio(
-            phone=emergency_phone,
-            message=alert_message,
+        # Guard against repeated dispatches when threat state oscillates rapidly.
+        self._last_emergency_dispatch_at = now
+        sent, provider_response = self._send_email_alert(
+            to_email=emergency_email,
+            subject=alert_subject,
+            body=alert_message,
         )
 
         # One outbound SMS attempt per attack cycle.
@@ -514,8 +991,8 @@ class SystemController:
         if sent:
             self.database.insert_alert(
                 "UNDER_ATTACK",
-                "Emergency SOS Triggered",
-                f"Emergency alert sent to {emergency_phone}.",
+                "Emergency Email Sent",
+                f"Emergency alert email sent to {emergency_email}.",
                 severity="critical",
             )
             self.database.log_event(
@@ -527,16 +1004,16 @@ class SystemController:
                     "file_path": "",
                     "cpu_usage": cpu_usage,
                     "file_rate": file_rate,
-                    "phone": emergency_phone,
-                    "provider": "twilio",
+                    "email": emergency_email,
+                    "provider": "smtp",
                 }
             )
             return
 
         self.database.insert_alert(
             "UNDER_ATTACK",
-            "Emergency SOS Failed",
-            "Failed to deliver emergency SMS. Check Twilio environment configuration.",
+            "Emergency Email Failed",
+            "Failed to deliver emergency alert email. Check SMTP environment configuration.",
             severity="high",
         )
         self.database.log_event(
@@ -548,8 +1025,8 @@ class SystemController:
                 "file_path": "",
                 "cpu_usage": cpu_usage,
                 "file_rate": file_rate,
-                "phone": emergency_phone,
-                "provider": "twilio",
+                "email": emergency_email,
+                "provider": "smtp",
                 "error": provider_response,
             }
         )
@@ -642,7 +1119,10 @@ class SystemController:
             seen.add(key)
             normalized_restored.append(candidate)
 
-        restored_count = len(normalized_restored)
+        user_visible_restored = [
+            value for value in normalized_restored if _is_user_visible_restored_file(value)
+        ]
+        restored_count = len(user_visible_restored)
         self.database.log_event(
             {
                 "event": "files_restored",
@@ -655,7 +1135,9 @@ class SystemController:
                 "score": score,
                 "level": level,
                 "restored_count": restored_count,
-                "restored_files": normalized_restored[:40],
+                "restored_raw_count": len(normalized_restored),
+                "restored_files": user_visible_restored[:40],
+                "restored_raw_files": normalized_restored[:40],
             }
         )
 
@@ -670,7 +1152,7 @@ class SystemController:
             severity="high" if restored_count > 0 else "medium",
         )
 
-        return normalized_restored
+        return user_visible_restored
 
     def restart(self) -> dict[str, Any]:
         if self.pipeline is not None and self.pipeline.monitor.is_running:
@@ -684,6 +1166,7 @@ class SystemController:
         self.pipeline = None
         self._attack_active = False
         self._warning_active = False
+        self._safe_cycle_streak = 0
         self._last_recovery_count = 0
 
         self._start_engine()
@@ -698,6 +1181,7 @@ class SystemController:
             self.pipeline.stop()
             self._attack_active = False
             self._warning_active = False
+            self._safe_cycle_streak = 0
             self._last_recovery_count = 0
 
             latest_metric = self.database.fetch_latest_metric() or {}
@@ -718,6 +1202,7 @@ class SystemController:
     def backup_status(self) -> dict[str, Any]:
         if self.pipeline is not None:
             status = self.pipeline.snapshot_manager.status()
+            status["files_secured"] = _count_user_visible_files_in_directories(self.protected_directories)
             status["status"] = "Active"
             if not status.get("last_backup_time"):
                 status["last_backup_time"] = self.database.fetch_latest_event_timestamp("backup_snapshot_created")
@@ -801,12 +1286,11 @@ class SystemController:
         return restored
 
     def set_emergency_contact(self, phone: str) -> str:
-        normalized_phone = _normalize_contact_value(phone)
-        digits_only = "".join(ch for ch in normalized_phone if ch.isdigit())
-        if len(digits_only) < 8:
-            raise ValueError("invalid_phone")
+        normalized_contact = _normalize_contact_value(phone)
+        if not _is_valid_email(normalized_contact):
+            raise ValueError("invalid_email")
 
-        self.database.set_setting("emergency_contact", normalized_phone)
+        self.database.set_setting("emergency_contact", normalized_contact)
 
         latest_metric = self.database.fetch_latest_metric() or {}
         self.database.log_event(
@@ -818,10 +1302,10 @@ class SystemController:
                 "file_path": "",
                 "cpu_usage": float(latest_metric.get("cpu_percent") or 0.0),
                 "file_rate": float(latest_metric.get("files_per_second") or 0.0),
-                "phone": normalized_phone,
+                "email": normalized_contact,
             }
         )
-        return normalized_phone
+        return normalized_contact
 
     def get_emergency_contact(self) -> str:
         return self.database.get_setting("emergency_contact", "")
@@ -1144,14 +1628,19 @@ def register_routes(flask_app: Flask) -> None:
     def save_emergency_contact() -> Any:
         controller = _controller_from_app(flask_app)
         body = request.get_json(silent=True) or {}
-        phone = str(body.get("phone") or body.get("contact") or "").strip()
-        if not phone:
-            return jsonify({"message": "phone_required"}), 400
+        contact = str(
+            body.get("email")
+            or body.get("contact")
+            or body.get("phone")
+            or ""
+        ).strip()
+        if not contact:
+            return jsonify({"message": "contact_required"}), 400
 
         try:
-            saved_phone = controller.set_emergency_contact(phone)
+            saved_phone = controller.set_emergency_contact(contact)
         except ValueError:
-            return jsonify({"message": "invalid_phone"}), 400
+            return jsonify({"message": "invalid_email"}), 400
 
         return jsonify({"message": "contact_saved", "contact": saved_phone})
 
@@ -1187,6 +1676,29 @@ def register_routes(flask_app: Flask) -> None:
             download_name="attack_report.txt",
             mimetype="text/plain",
         )
+
+    @flask_app.route("/api/simulate/attack", methods=["POST"])
+    def simulate_attack() -> Any:
+        controller = _controller_from_app(flask_app)
+        body = request.get_json(silent=True) or {}
+        level = str(body.get("level") or "high").strip().lower()
+        wait_timeout = body.get("wait_timeout", 25)
+
+        try:
+            result = controller.run_attack_simulation(
+                level=level,
+                wait_timeout=int(wait_timeout),
+            )
+        except ValueError:
+            return jsonify({"message": "invalid_level", "allowed": ["low", "medium", "high"]}), 400
+        except RuntimeError as error:
+            if str(error) == "simulation_in_progress":
+                return jsonify({"message": "simulation_in_progress"}), 409
+            return jsonify({"message": "simulation_failed", "error": str(error)}), 500
+        except OSError as error:
+            return jsonify({"message": "simulation_failed", "error": str(error)}), 500
+
+        return jsonify(result)
 
     @flask_app.route("/api/start", methods=["POST"])
     def start_monitoring() -> Any:
