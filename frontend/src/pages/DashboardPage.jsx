@@ -138,6 +138,7 @@ export default function DashboardPage() {
     files_encrypted: 0,
     files_recovered: 0,
     threat_confidence: 0,
+    honeytrap_triggers: 0,
   });
   const [fileStats, setFileStats] = useState({
     files_protected: 0,
@@ -158,6 +159,7 @@ export default function DashboardPage() {
         files_encrypted: Number(summaryData.files_encrypted ?? 0),
         files_recovered: Number(summaryData.files_recovered ?? 0),
         threat_confidence: Number(summaryData.threat_confidence ?? 0),
+        honeytrap_triggers: Number(summaryData.honeytrap_triggers ?? 0),
       });
       setFileStats({
         files_protected: Number(statsData.files_protected ?? 0),
@@ -624,7 +626,11 @@ export default function DashboardPage() {
             attackSummary={attackSummary}
             fileStats={fileStats}
           />
-          <SystemTimelinePanel timeline={timeline} />
+          <SystemTimelinePanel
+            timeline={timeline}
+            onClearTimeline={handleClearLogs}
+            isClearingTimeline={clearingLogs}
+          />
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">

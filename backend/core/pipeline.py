@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .backup import VersionedSnapshotManager
 from .dna import DigitalDNAStore, compare_dna
@@ -25,6 +25,7 @@ class CyberShieldPipeline:
         network_mode: str = "safe",
         max_file_activity: int = 200,
         max_dna_mismatch: int = 20,
+        on_monitor_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         paths = list(watch_paths) if watch_paths is not None else default_monitor_paths()
         unique_paths: list[Path] = []
@@ -51,6 +52,7 @@ class CyberShieldPipeline:
         self.network_mode = network_mode
         self.max_file_activity = max(1, int(max_file_activity))
         self.max_dna_mismatch = max(1, int(max_dna_mismatch))
+        self.on_monitor_event = on_monitor_event
 
         self.monitor = RealTimeMonitor(watch_paths=self.watch_paths, on_event=self._on_monitor_event)
         self.snapshot_manager = VersionedSnapshotManager(self.watch_paths, self.backup_root)
@@ -382,6 +384,11 @@ class CyberShieldPipeline:
         if action == "deleted":
             with self._lock:
                 self._dna_baseline.pop(key, None)
+            if self.on_monitor_event is not None:
+                try:
+                    self.on_monitor_event(payload)
+                except (RuntimeError, ValueError, TypeError, OSError):
+                    return
             return
 
         if not path.exists() or not path.is_file():
@@ -404,4 +411,13 @@ class CyberShieldPipeline:
             self.snapshot_manager.create_snapshot(path, force=force_snapshot)
         except (PermissionError, OSError):
             # File locks are expected during active incidents; keep monitor thread alive.
+            return
+
+        if self.on_monitor_event is None:
+            return
+
+        try:
+            self.on_monitor_event(payload)
+        except (RuntimeError, ValueError, TypeError, OSError):
+            # Honeytrap/action hooks must never break core monitoring.
             return
