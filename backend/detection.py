@@ -92,6 +92,9 @@ class DetectionEngine:
         self._event_times: Deque[float] = deque(maxlen=5000)
         self._modification_times: Deque[float] = deque(maxlen=5000)
         self._access_times: Deque[float] = deque(maxlen=5000)
+        self._folder_modification_times: dict[str, Deque[float]] = {
+            str(path): deque(maxlen=5000) for path in self.monitored_paths
+        }
         self._touched_paths: set[str] = set()
         self._suspicious_paths: set[str] = set()
         self._attack_active = False
@@ -203,14 +206,20 @@ class DetectionEngine:
         raw_src_path = src_path
         path = Path(src_path).resolve()
         dest = Path(dest_path).resolve() if dest_path else None
+        monitored_root = self._resolve_monitored_root(path)
+        monitored_dest_root = self._resolve_monitored_root(dest) if dest is not None else None
         with self._lock:
             self._event_times.append(now)
             self._access_times.append(now)
             if event_type in {"modified", "created", "moved", "deleted"}:
                 self._modification_times.append(now)
+                if monitored_root is not None:
+                    self._folder_modification_times[monitored_root].append(now)
             self._touched_paths.add(str(path))
             if dest is not None:
                 self._touched_paths.add(str(dest))
+                if event_type in {"moved", "created", "modified"} and monitored_dest_root is not None:
+                    self._folder_modification_times[monitored_dest_root].append(now)
             if path.suffix.lower() in SUSPICIOUS_EXTENSIONS:
                 self._suspicious_paths.add(str(path))
             if dest is not None and dest.suffix.lower() in SUSPICIOUS_EXTENSIONS:
@@ -284,6 +293,20 @@ class DetectionEngine:
             if int(data.get("files_restored", 0)) > 0
             else "Automatic System Recovery not required"
         )
+        files_affected = int(data.get("files_affected", 0) or 0)
+        files_restored = int(data.get("files_restored", 0) or 0)
+        files_irrecoverable = int(
+            data.get("files_irrecoverable", max(files_affected - files_restored, 0)) or 0
+        )
+        if files_affected <= 0 or (files_restored >= files_affected and files_irrecoverable <= 0):
+            status_text = "✔ No data loss"
+        elif files_restored > 0:
+            status_text = (
+                f"⚠ Partial recovery ({files_restored}/{files_affected} files restored, "
+                f"{files_irrecoverable} unrecoverable)"
+            )
+        else:
+            status_text = f"✖ Recovery failed ({files_irrecoverable or files_affected} files unrecoverable)"
         report_text = (
             "--- CyberShield Attack Report ---\n\n"
             f"Time: {data.get('timestamp')}\n"
@@ -364,6 +387,9 @@ class DetectionEngine:
             event_times = self._trimmed(self._event_times, now, 1.0)
             modification_times = self._trimmed(self._modification_times, now, 5.0)
             access_times = self._trimmed(self._access_times, now, 5.0)
+            folder_modification_counts: dict[str, int] = {}
+            for folder_path, times in self._folder_modification_times.items():
+                folder_modification_counts[folder_path] = len(self._trimmed(times, now, 5.0))
 
         cpu_percent = psutil.cpu_percent(interval=None)
         utility_cpu = self._read_windows_cpu_utility()
@@ -375,11 +401,15 @@ class DetectionEngine:
         files_per_second = float(len(event_times))
         modifications = len(modification_times)
         accesses = len(access_times)
+        folders_with_activity = sum(1 for count in folder_modification_counts.values() if count > 0)
+        folders_with_spike = sum(1 for count in folder_modification_counts.values() if count >= 5)
 
         status = "SAFE"
         signals = 0
         rapid_modifications = files_per_second >= 4 or modifications >= 6
         suspicious_extension = bool(self._suspicious_paths)
+        cross_folder_spike = modifications > 20 and folders_with_activity >= 2
+        cross_folder_ramp = folders_with_spike >= 2 and modifications >= 10
         high_access_rate = accesses >= 10
         cpu_spike = cpu_for_detection >= 70.0
         pre_attack_signal = (
@@ -403,12 +433,19 @@ class DetectionEngine:
             signals += 1
         if suspicious_extension:
             signals += 1
+        if cross_folder_spike or cross_folder_ramp:
+            signals += 2
         if high_access_rate:
             signals += 1
         if cpu_spike:
             signals += 1
 
-        full_detection = (suspicious_extension and signals >= 2) or (not suspicious_extension and signals >= 3)
+        full_detection = (
+            cross_folder_spike
+            or cross_folder_ramp
+            or (suspicious_extension and signals >= 2)
+            or (not suspicious_extension and signals >= 3)
+        )
 
         if pre_attack_signal and not self._early_warning_active:
             self._early_warning_active = True
@@ -446,6 +483,7 @@ class DetectionEngine:
                 accesses=accesses,
                 cpu_percent=cpu_for_detection,
                 suspicious_extension=suspicious_extension,
+                folder_modification_counts=folder_modification_counts,
             )
         else:
             self.status = "UNDER_ATTACK" if self._early_warning_active else "SAFE"
@@ -481,6 +519,18 @@ class DetectionEngine:
         calibrated = (self._cpu_raw_blend * raw) + ((1.0 - self._cpu_raw_blend) * rolling_average)
         calibrated = max(0.0, min(100.0, calibrated))
         return raw, calibrated
+
+    def _resolve_monitored_root(self, path: Path | None) -> str | None:
+        if path is None:
+            return None
+        resolved = path.resolve()
+        for monitored_path in self.monitored_paths:
+            try:
+                resolved.relative_to(monitored_path)
+                return str(monitored_path)
+            except ValueError:
+                continue
+        return None
 
     def _read_windows_cpu_utility(self) -> float | None:
         if os.name != "nt":
@@ -518,6 +568,7 @@ class DetectionEngine:
         accesses: int,
         cpu_percent: float,
         suspicious_extension: bool,
+        folder_modification_counts: dict[str, int] | None = None,
     ) -> None:
         if self._attack_active:
             self.status = "UNDER_ATTACK"
@@ -550,6 +601,31 @@ class DetectionEngine:
             severity="critical",
             fingerprint_match=fingerprint["signature_hash"],
         )
+        if folder_modification_counts:
+            active_folders = [path for path, count in folder_modification_counts.items() if count > 0]
+            spike_folders = [path for path, count in folder_modification_counts.items() if count >= 5]
+            if len(active_folders) >= 2 and modifications > 20:
+                self.database.insert_alert(
+                    "UNDER_ATTACK",
+                    "Cross-folder ransomware spread detected",
+                    (
+                        f"Rapid file changes across multiple folders detected: {len(active_folders)} folders active "
+                        f"with {modifications} modifications in the last 5 seconds."
+                    ),
+                    severity="critical",
+                    fingerprint_match=fingerprint["signature_hash"],
+                )
+            elif len(spike_folders) >= 2 and modifications >= 10:
+                self.database.insert_alert(
+                    "UNDER_ATTACK",
+                    "Cross-folder ransomware spread suspected",
+                    (
+                        f"Multiple folders are spiking simultaneously: {len(spike_folders)} folders with "
+                        f"rapid modification bursts in the last 5 seconds."
+                    ),
+                    severity="high",
+                    fingerprint_match=fingerprint["signature_hash"],
+                )
         self.log_event(
             event="attack_detected",
             action="flagged",
@@ -597,6 +673,45 @@ class DetectionEngine:
                 severity="high",
                 fingerprint_match=fingerprint["signature_hash"],
             )
+            if kill_result is None:
+                self.database.insert_log(
+                    "warning",
+                    "Containment scan completed without a confident process kill",
+                    metadata={"target_paths": self._target_paths()},
+                )
+            else:
+                self.database.insert_log(
+                    "warning",
+                    "Suspicious process terminated",
+                    process_name=kill_result.name,
+                    metadata={
+                        "pid": kill_result.pid,
+                        "cmdline": kill_result.cmdline,
+                        "reason": kill_result.reason,
+                        "success": kill_result.success,
+                        "error": kill_result.error,
+                    },
+                )
+                if kill_result.success:
+                    self.database.insert_alert(
+                        "UNDER_ATTACK",
+                        "Suspicious process killed",
+                        f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
+                        severity="high",
+                        fingerprint_match=fingerprint["signature_hash"],
+                    )
+                else:
+                    failure_reason = kill_result.error or kill_result.reason
+                    self.database.insert_alert(
+                        "UNDER_ATTACK",
+                        "Failed to kill suspicious process",
+                        (
+                            f"Termination failed for process {kill_result.name} (PID {kill_result.pid}). "
+                            f"Reason: {failure_reason}."
+                        ),
+                        severity="critical",
+                        fingerprint_match=fingerprint["signature_hash"],
+                    )
 
         restored_count = int(intervention_result.get("files_recovered") or 0)
 
