@@ -9,6 +9,7 @@ import FingerprintPanel from '../components/FingerprintPanel';
 import LogsTimeline from '../components/LogsTimeline';
 import StatusCard from '../components/StatusCard';
 import SystemTimelinePanel from '../components/SystemTimelinePanel';
+import InterventionPanel from '../components/InterventionPanel';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
 
@@ -119,6 +120,7 @@ export default function DashboardPage() {
   const [clearingLogs, setClearingLogs] = useState(false);
   const [isRunningBackup, setIsRunningBackup] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
+  const [isRunningIntervention, setIsRunningIntervention] = useState(false);
   const [backupStatus, setBackupStatus] = useState({
     status: 'Inactive',
     files_secured: 0,
@@ -133,6 +135,8 @@ export default function DashboardPage() {
   const [isDownloadingReport, setIsDownloadingReport] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [emergencyMessage, setEmergencyMessage] = useState('');
+  const [interventionMessage, setInterventionMessage] = useState('');
+  const [interventionResult, setInterventionResult] = useState(null);
   const [attackSummary, setAttackSummary] = useState({
     files_protected: 0,
     files_encrypted: 0,
@@ -149,25 +153,37 @@ export default function DashboardPage() {
 
   const loadSystemIntelligence = async () => {
     try {
-      const [summaryData, statsData, timelineData] = await Promise.all([
+      const [summaryResult, statsResult, timelineResult] = await Promise.allSettled([
         fetchJson('/api/attack/summary', {}, 6000),
         fetchJson('/api/file-stats', {}, 6000),
         fetchJson('/api/timeline', {}, 6000),
       ]);
-      setAttackSummary({
-        files_protected: Number(summaryData.files_protected ?? 0),
-        files_encrypted: Number(summaryData.files_encrypted ?? 0),
-        files_recovered: Number(summaryData.files_recovered ?? 0),
-        threat_confidence: Number(summaryData.threat_confidence ?? 0),
-        honeytrap_triggers: Number(summaryData.honeytrap_triggers ?? 0),
-      });
-      setFileStats({
-        files_protected: Number(statsData.files_protected ?? 0),
-        files_recovered: Number(statsData.files_recovered ?? 0),
-      });
-      setTimeline(Array.isArray(timelineData.timeline) ? timelineData.timeline : []);
+
+      if (summaryResult.status === 'fulfilled') {
+        const summaryData = summaryResult.value;
+        setAttackSummary({
+          files_protected: Number(summaryData.files_protected ?? 0),
+          files_encrypted: Number(summaryData.files_encrypted ?? 0),
+          files_recovered: Number(summaryData.files_recovered ?? 0),
+          threat_confidence: Number(summaryData.threat_confidence ?? 0),
+          honeytrap_triggers: Number(summaryData.honeytrap_triggers ?? 0),
+        });
+      }
+
+      if (statsResult.status === 'fulfilled') {
+        const statsData = statsResult.value;
+        setFileStats({
+          files_protected: Number(statsData.files_protected ?? 0),
+          files_recovered: Number(statsData.files_recovered ?? 0),
+        });
+      }
+
+      if (timelineResult.status === 'fulfilled') {
+        const timelineData = timelineResult.value;
+        setTimeline(Array.isArray(timelineData.timeline) ? timelineData.timeline : []);
+      }
     } catch {
-      // Do not block dashboard refresh when intelligence endpoints are briefly unavailable.
+      // Keep the last successful intelligence snapshot if polling is interrupted.
     }
   };
 
@@ -197,51 +213,75 @@ export default function DashboardPage() {
   };
 
   const loadSnapshot = async () => {
-    try {
-      const [statusData, alertsData, logsData, fingerprintsData, metricsData] =
-        await Promise.all([
-          fetchJson('/api/status'),
-          fetchJson('/api/alerts'),
-          fetchJson('/api/logs'),
-          fetchJson('/api/fingerprints'),
-          fetchJson('/api/metrics'),
-        ]);
+    const [statusResult, alertsResult, logsResult, fingerprintsResult, metricsResult] =
+      await Promise.allSettled([
+        fetchJson('/api/status'),
+        fetchJson('/api/alerts'),
+        fetchJson('/api/logs'),
+        fetchJson('/api/fingerprints'),
+        fetchJson('/api/metrics'),
+      ]);
 
-      setSnapshot({
-        status: statusData.status,
-        confidence: Number(statusData.confidence ?? 0),
-        is_monitoring: Boolean(statusData.is_monitoring),
-        monitor_paths: statusData.monitor_paths ?? [],
-        monitoring_message:
+    setSnapshot((current) => {
+      const nextSnapshot = { ...current };
+
+      if (statusResult.status === 'fulfilled') {
+        const statusData = statusResult.value;
+        nextSnapshot.status = statusData.status;
+        nextSnapshot.confidence = Number(statusData.confidence ?? 0);
+        nextSnapshot.is_monitoring = Boolean(statusData.is_monitoring);
+        nextSnapshot.monitor_paths = statusData.monitor_paths ?? [];
+        nextSnapshot.monitoring_message =
           statusData.monitoring_message ??
-          'Monitoring: Protected System Directories (Auto-configured)',
-        core_pipeline: statusData.core_pipeline ?? initialSnapshot.core_pipeline,
-        metrics: metricsData.metrics ?? initialSnapshot.metrics,
-        alerts: alertsData.alerts ?? [],
-        logs: logsData.logs ?? [],
-        fingerprints: fingerprintsData.fingerprints ?? [],
-      });
+          'Monitoring: Protected System Directories (Auto-configured)';
+        nextSnapshot.core_pipeline = statusData.core_pipeline ?? initialSnapshot.core_pipeline;
+      }
 
-      const graphHistory = (metricsData.history ?? []).map((entry) => ({
-        // Keep chart responsive to both short bursts and sustained file churn.
-        activity_signal: Math.max(
-          Number(entry.files_per_second ?? 0),
-          Number(entry.modifications ?? 0),
-        ),
-        label: timeLabel(entry.timestamp),
-        files_per_second: Number(entry.files_per_second ?? 0),
-      }));
-      setHistory(graphHistory);
-      setError('');
-    } catch (requestError) {
-      if (requestError.name === 'AbortError') {
+      if (alertsResult.status === 'fulfilled') {
+        nextSnapshot.alerts = alertsResult.value.alerts ?? [];
+      }
+
+      if (logsResult.status === 'fulfilled') {
+        nextSnapshot.logs = logsResult.value.logs ?? [];
+      }
+
+      if (fingerprintsResult.status === 'fulfilled') {
+        nextSnapshot.fingerprints = fingerprintsResult.value.fingerprints ?? [];
+      }
+
+      if (metricsResult.status === 'fulfilled') {
+        nextSnapshot.metrics = metricsResult.value.metrics ?? initialSnapshot.metrics;
+        const graphHistory = (metricsResult.value.history ?? []).map((entry) => ({
+          // Keep chart responsive to both short bursts and sustained file churn.
+          activity_signal: Math.max(
+            Number(entry.files_per_second ?? 0),
+            Number(entry.modifications ?? 0),
+          ),
+          label: timeLabel(entry.timestamp),
+          files_per_second: Number(entry.files_per_second ?? 0),
+        }));
+        setHistory(graphHistory);
+      }
+
+      return nextSnapshot;
+    });
+
+    const requestErrors = [statusResult, alertsResult, logsResult, fingerprintsResult, metricsResult].filter(
+      (result) => result.status === 'rejected',
+    );
+
+    if (requestErrors.length === 5) {
+      const firstError = requestErrors[0].reason;
+      if (firstError?.name === 'AbortError') {
         setError('Request timeout. Reconnecting to backend...');
       } else {
-        setError(requestError.message);
+        setError(firstError?.message ?? 'Failed to refresh dashboard data.');
       }
-    } finally {
-      setLoading(false);
+    } else {
+      setError('');
     }
+
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -353,6 +393,49 @@ export default function DashboardPage() {
       setError(requestError.message);
     } finally {
       setIsSimulating(false);
+    }
+  };
+
+  const handleSafeIntervention = async () => {
+    setIsRunningIntervention(true);
+    try {
+      const response = await fetchJson(
+        '/api/intervention/handle',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            lookback_seconds: 5,
+            cpu_threshold: 65,
+            terminate_threshold: 60,
+            recheck_delay_seconds: 1.5,
+          }),
+        },
+        45000,
+      );
+
+      setInterventionResult({
+        status: String(response.status ?? 'SAFE'),
+        action_taken: Array.isArray(response.action_taken) ? response.action_taken : [],
+        files_protected: Number(response.files_protected ?? 0),
+        files_recovered: Number(response.files_recovered ?? 0),
+        suspicious_processes: Array.isArray(response.suspicious_processes) ? response.suspicious_processes : [],
+        confirmed_processes: Array.isArray(response.confirmed_processes) ? response.confirmed_processes : [],
+      });
+
+      const actionSummary = Array.isArray(response.action_taken) && response.action_taken.length > 0
+        ? response.action_taken.join(', ')
+        : 'no_actions_needed';
+      setInterventionMessage(
+        `Safe intervention completed with ${actionSummary}. Protected ${Number(response.files_protected ?? 0)} files and recovered ${Number(response.files_recovered ?? 0)} files.`,
+      );
+      setError('');
+      await loadSnapshot();
+      await loadBackupStatus();
+      await loadSystemIntelligence();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsRunningIntervention(false);
     }
   };
 
@@ -575,6 +658,14 @@ export default function DashboardPage() {
               >
                 {isSimulating ? 'Running Simulation...' : 'Run Attack Simulation'}
               </button>
+              <button
+                type="button"
+                disabled={busy || isSimulating || isRunningIntervention}
+                onClick={handleSafeIntervention}
+                className="mt-3 w-full rounded-2xl border border-sky-400/40 bg-sky-500/10 px-4 py-3 text-sm font-semibold text-sky-200 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/70 disabled:text-slate-500"
+              >
+                {isRunningIntervention ? 'Running Safe Intervention...' : 'Run Safe Intervention'}
+              </button>
               <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-sm text-slate-300">
                 <div className="flex items-center justify-between gap-3">
                   <span>Status</span>
@@ -609,6 +700,11 @@ export default function DashboardPage() {
               {error ? (
                 <div className="mt-4 rounded-2xl border border-rose-400/30 bg-rose-500/10 p-4 text-sm text-rose-100">
                   {error}
+                </div>
+              ) : null}
+              {interventionMessage ? (
+                <div className="mt-4 rounded-2xl border border-sky-400/30 bg-sky-500/10 p-4 text-sm text-sky-100">
+                  {interventionMessage}
                 </div>
               ) : null}
             </div>
@@ -649,6 +745,13 @@ export default function DashboardPage() {
           isRunningBackup={isRunningBackup}
           isRecovering={isRecovering}
           message={backupMessage}
+        />
+
+        <InterventionPanel
+          result={interventionResult}
+          onRunIntervention={handleSafeIntervention}
+          isRunningIntervention={isRunningIntervention}
+          message={interventionMessage}
         />
 
         <EmergencyPanel

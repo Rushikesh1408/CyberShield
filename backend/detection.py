@@ -18,6 +18,10 @@ from backend.backup import BackupManager
 from backend.database import Database
 from backend.fingerprint import FingerprintManager
 from backend.process_killer import ProcessKiller
+from backend.services import BackupService
+from backend.services import ProcessService
+from backend.services import RecoveryService
+from backend.services import SafeInterventionService
 
 SUSPICIOUS_EXTENSIONS = {".enc", ".locked", ".encrypted", ".crypt", ".ransom"}
 PRE_ATTACK_CPU_THRESHOLD = 70.0
@@ -62,6 +66,20 @@ class DetectionEngine:
         self.database = database
         self.fingerprint_manager = fingerprint_manager
         self.process_killer = process_killer
+        self.process_service = ProcessService()
+        self.safe_intervention_service = SafeInterventionService(
+            database=self.database,
+            process_service=self.process_service,
+            backup_service=BackupService(
+                monitored_paths=unique_paths,
+                backup_root=self.backup_manager.backup_root,
+                backup_manager=self.backup_manager,
+            ),
+            recovery_service=RecoveryService(
+                monitored_paths=unique_paths,
+                backup_root=self.backup_manager.backup_root,
+            ),
+        )
         self.report_file_path = Path(report_file_path).resolve()
         self.report_file_path.parent.mkdir(parents=True, exist_ok=True)
         self.observer = Observer()
@@ -545,37 +563,42 @@ class DetectionEngine:
             },
         )
 
-        kill_result = self.process_killer.scan_and_kill(
-            self._target_paths(),
-            reason="ransomware-like file activity",
+        intervention_result = self.safe_intervention_service.handle_attack(
+            monitored_paths=self.monitored_paths,
+            lookback_seconds=5.0,
+            cpu_threshold=PRE_ATTACK_CPU_THRESHOLD,
+            terminate_threshold=PRE_ATTACK_CPU_THRESHOLD,
+            recheck_delay_seconds=1.5,
         )
-        if kill_result is not None:
+        terminated_processes = intervention_result.get("confirmed_processes")
+        terminated_process_name = ""
+        if isinstance(terminated_processes, list) and terminated_processes:
+            first_confirmed = terminated_processes[0]
+            if isinstance(first_confirmed, dict):
+                terminated_process_name = str(first_confirmed.get("name") or "")
+
+        if terminated_process_name:
             self.log_event(
                 event="active_threat_neutralization",
-                action="killed",
+                action="contained",
                 event_type="critical",
                 cpu_usage=cpu_percent,
                 file_rate=files_per_second,
                 extra={
-                    "process_name": kill_result.name,
-                    "pid": kill_result.pid,
-                    "cmdline": kill_result.cmdline,
-                    "reason": kill_result.reason,
-                    "success": kill_result.success,
+                    "process_name": terminated_process_name,
+                    "processes": terminated_processes,
+                    "action_taken": intervention_result.get("action_taken", []),
                 },
             )
             self.database.insert_alert(
                 "UNDER_ATTACK",
                 "Active Threat Neutralization",
-                f"Terminated process {kill_result.name} (PID {kill_result.pid}).",
+                f"Contained suspicious process activity for {terminated_process_name}.",
                 severity="high",
                 fingerprint_match=fingerprint["signature_hash"],
             )
 
-        restored = self.backup_manager.restore_many(
-            self._restorable_paths(),
-            before_timestamp=self._last_attack_at,
-        )
+        restored_count = int(intervention_result.get("files_recovered") or 0)
 
         with self._lock:
             suspicious_count = len(self._suspicious_paths)
@@ -586,26 +609,25 @@ class DetectionEngine:
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "attack_type": "mass_encryption" if suspicious_extension else "suspicious_activity",
-                "process_name": kill_result.name if kill_result is not None else suspected_process_name,
+                "process_name": terminated_process_name or suspected_process_name,
                 "cpu_usage": round(cpu_percent, 2),
                 "files_affected": files_affected,
-                "process_terminated": bool(kill_result and kill_result.success),
-                "files_restored": len(restored),
+                "process_terminated": "process_terminated" in intervention_result.get("action_taken", []),
+                "files_restored": restored_count,
                 "file_rate": round(files_per_second, 2),
                 "threat_confidence": self._threat_confidence,
             }
         )
 
-        if restored:
+        if restored_count > 0:
             self.log_event(
                 event="automatic_system_recovery",
                 action="restored",
                 event_type="info",
                 cpu_usage=cpu_percent,
                 file_rate=files_per_second,
-                extra={"restored_count": len(restored), "restored": restored},
+                extra={"restored_count": restored_count, "restored": intervention_result.get("files_recovered", [])},
             )
-        self._cleanup_suspicious_files()
         self._suppress_events_until = time.time() + 2.5
         self._attack_active = False
         self.status = "SAFE"
