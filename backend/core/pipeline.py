@@ -7,6 +7,7 @@ from typing import Any, Callable, Iterable
 
 from .backup import VersionedSnapshotManager
 from .dna import DigitalDNAStore, compare_dna
+from .entropy import calculate_entropy
 from .monitor import RealTimeMonitor, default_monitor_paths
 from .network_isolation import isolate_network
 from .restore import RestoreManager
@@ -349,10 +350,26 @@ class CyberShieldPipeline:
         with self._lock:
             dna_mismatch_count = self._dna_mismatch_count
 
+        entropy_values: list[float] = []
+        try:
+            recent_paths = self.recent_activity_paths(lookback_seconds=20.0, limit=8)
+        except (RuntimeError, ValueError, OSError):
+            recent_paths = []
+
+        for file_path in recent_paths:
+            try:
+                entropy_values.append(calculate_entropy(file_path))
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+
+        average_entropy = sum(entropy_values) / len(entropy_values) if entropy_values else 0.0
+
         return calculate_threat_score(
             file_activity_count=int(monitor_snapshot.get("file_activity_count", 0)),
             cpu_usage=float(monitor_snapshot.get("cpu_usage", 0.0)),
             dna_mismatch_count=int(dna_mismatch_count),
+            entropy=float(average_entropy),
+            entropy_threshold_hit=float(average_entropy) >= 7.5,
             idle_seconds=float(monitor_snapshot.get("idle_seconds") or 0.0),
             max_file_activity=self.max_file_activity,
             max_dna_mismatch=self.max_dna_mismatch,

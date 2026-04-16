@@ -7,11 +7,13 @@ import time
 import json
 import smtplib
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Deque
+from queue import Empty, Queue
 import urllib.error
 import urllib.request
 
@@ -24,12 +26,24 @@ if __package__ in {None, ""}:
     from backend.core import isolate_network
     from backend.database import Database
     from backend.fingerprint import FingerprintManager
+    from backend.services import BackupService
+    from backend.services import DetectionService
+    from backend.services import ForensicService
+    from backend.services import ProcessService
+    from backend.services import RecoveryService
+    from backend.services import SafeInterventionService
 else:
     from .config import AppConfig
     from .core import CyberShieldPipeline
     from .core import isolate_network
     from .database import Database
     from .fingerprint import FingerprintManager
+    from .services import BackupService
+    from .services import DetectionService
+    from .services import ForensicService
+    from .services import ProcessService
+    from .services import RecoveryService
+    from .services import SafeInterventionService
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BACKUP_ROOT = PROJECT_ROOT / "backup"
@@ -259,6 +273,25 @@ class SystemController:
         self.database = Database(DATABASE_PATH)
         self.fingerprint_manager = FingerprintManager(self.database)
         self.protected_directories = discover_protected_directories()
+        self.process_service: ProcessService | None = None
+        self.detection_service: DetectionService | None = None
+        self.backup_service: BackupService | None = None
+        self.recovery_service: RecoveryService | None = None
+        self.forensic_service: ForensicService | None = None
+        self.safe_intervention_service: SafeInterventionService | None = None
+        self.action_queue: Queue[dict[str, Any]] = Queue()
+        self._action_worker_stop = threading.Event()
+        self._action_worker_thread: threading.Thread | None = None
+        self._forensic_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cybershield-forensic")
+        self._performance_lock = threading.Lock()
+        self._detection_latencies_ms: deque[float] = deque(maxlen=200)
+        self._intervention_delays_ms: deque[float] = deque(maxlen=200)
+        self._forensic_jobs_pending = 0
+        self._intervention_tasks_queued = 0
+        self._intervention_tasks_completed = 0
+        self._intervention_tasks_dropped = 0
+        self._max_intervention_queue_size = 12
+        self._configure_safe_intervention_services()
         self.pipeline: CyberShieldPipeline | None = None
         self._pipeline_thread: threading.Thread | None = None
         self._pipeline_stop_event = threading.Event()
@@ -294,6 +327,167 @@ class SystemController:
         if self._honeytrap_enabled:
             self._honeytrap_paths = self._seed_honeytrap_files()
         self._start_engine()
+        self._start_background_workers()
+
+    def _configure_safe_intervention_services(self) -> None:
+        self.process_service = ProcessService()
+        self.backup_service = BackupService(
+            monitored_paths=self.protected_directories,
+            backup_root=BACKUP_ROOT,
+        )
+        self.detection_service = DetectionService(
+            process_service=self.process_service,
+            backup_service=self.backup_service,
+        )
+        self.recovery_service = RecoveryService(
+            monitored_paths=self.protected_directories,
+            backup_root=BACKUP_ROOT,
+        )
+        self.forensic_service = ForensicService(
+            database=self.database,
+            incident_root=DATA_ROOT / "incidents",
+        )
+        self.safe_intervention_service = SafeInterventionService(
+            database=self.database,
+            detection_service=self.detection_service,
+            process_service=self.process_service,
+            backup_service=self.backup_service,
+            recovery_service=self.recovery_service,
+            forensic_service=self.forensic_service,
+        )
+
+    def _start_background_workers(self) -> None:
+        if self._action_worker_thread is not None and self._action_worker_thread.is_alive():
+            return
+
+        self._action_worker_stop.clear()
+        self._action_worker_thread = threading.Thread(
+            target=self._intervention_worker,
+            name="cybershield-intervention-worker",
+            daemon=True,
+        )
+        self._action_worker_thread.start()
+
+    def _record_performance_sample(self, metric: str, value_ms: float) -> None:
+        with self._performance_lock:
+            if metric == "detection":
+                self._detection_latencies_ms.append(max(0.0, float(value_ms)))
+            elif metric == "intervention":
+                self._intervention_delays_ms.append(max(0.0, float(value_ms)))
+
+    @staticmethod
+    def _average(values: Deque[float]) -> float:
+        return round(sum(values) / len(values), 2) if values else 0.0
+
+    def performance_snapshot(self) -> dict[str, Any]:
+        with self._performance_lock:
+            return {
+                "avg_detection_latency_ms": self._average(self._detection_latencies_ms),
+                "avg_intervention_delay_ms": self._average(self._intervention_delays_ms),
+                "queue_size": int(self.action_queue.qsize()),
+                "queued_tasks": int(self._intervention_tasks_queued),
+                "completed_tasks": int(self._intervention_tasks_completed),
+                "dropped_tasks": int(self._intervention_tasks_dropped),
+                "pending_forensic_jobs": int(self._forensic_jobs_pending),
+                "worker_alive": bool(self._action_worker_thread and self._action_worker_thread.is_alive()),
+                "forensic_workers": 2,
+            }
+
+    def _submit_forensic_task(self, forensic_evidence: dict[str, Any]) -> None:
+        with self._performance_lock:
+            self._forensic_jobs_pending += 1
+
+        def _finalize(future):
+            try:
+                result = future.result()
+                self.database.log_event(
+                    {
+                        "event": "incident_package_created",
+                        "event_type": "info",
+                        "action": "stored",
+                        "file_name": "",
+                        "file_path": str(result.get("package_dir") or ""),
+                        "cpu_usage": 0.0,
+                        "file_rate": 0.0,
+                        "package_dir": str(result.get("package_dir") or ""),
+                    }
+                )
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                self.database.insert_log(
+                    "error",
+                    "forensic_generation_failed",
+                    metadata={"error": str(error)},
+                )
+            finally:
+                with self._performance_lock:
+                    self._forensic_jobs_pending = max(0, self._forensic_jobs_pending - 1)
+
+        future = self._forensic_executor.submit(
+            self.forensic_service.generate_incident_package,
+            evidence=forensic_evidence,
+        )
+        future.add_done_callback(_finalize)
+
+    def _intervention_worker(self) -> None:
+        while not self._action_worker_stop.is_set():
+            try:
+                task = self.action_queue.get(timeout=0.5)
+            except Empty:
+                continue
+
+            queued_at = float(task.get("queued_at") or time.perf_counter())
+            started_at = time.perf_counter()
+            try:
+                result = self.safe_intervention_service.handle_attack(
+                    monitored_paths=task.get("monitored_paths") or self.protected_directories,
+                    detection_context=(
+                        task.get("detection_context")
+                        if isinstance(task.get("detection_context"), dict)
+                        else None
+                    ),
+                    lookback_seconds=float(task.get("lookback_seconds") or 5.0),
+                    cpu_threshold=float(task.get("cpu_threshold") or 65.0),
+                    terminate_threshold=float(task.get("terminate_threshold") or 60.0),
+                    recheck_delay_seconds=float(task.get("recheck_delay_seconds") or 1.5),
+                    generate_forensics=False,
+                )
+                self._record_performance_sample("intervention", (time.perf_counter() - queued_at) * 1000.0)
+                with self._performance_lock:
+                    self._intervention_tasks_completed += 1
+
+                forensic_evidence = (
+                    result.get("forensic_evidence")
+                    if isinstance(result.get("forensic_evidence"), dict)
+                    else None
+                )
+                if forensic_evidence:
+                    self._submit_forensic_task(forensic_evidence)
+
+                self.database.log_event(
+                    {
+                        "event": "intervention_completed",
+                        "event_type": "info",
+                        "action": "restored",
+                        "file_name": "",
+                        "file_path": "",
+                        "cpu_usage": 0.0,
+                        "file_rate": 0.0,
+                        "queued_at": queued_at,
+                        "started_at": started_at,
+                        "completed_at": time.perf_counter(),
+                        "threat_detected": bool(result.get("threat_detected")),
+                    }
+                )
+            except (RuntimeError, ValueError, OSError, sqlite3.Error) as error:
+                with self._performance_lock:
+                    self._intervention_tasks_dropped += 1
+                self.database.insert_log(
+                    "error",
+                    "intervention_worker_failed",
+                    metadata={"error": str(error)},
+                )
+            finally:
+                self.action_queue.task_done()
 
     def _simulation_target_directory(self) -> Path:
         for path in self.protected_directories:
@@ -665,6 +859,105 @@ class SystemController:
             }
         )
 
+    def handle_attack(
+        self,
+        *,
+        lookback_seconds: float = 5.0,
+        cpu_threshold: float = 65.0,
+        terminate_threshold: float = 60.0,
+        recheck_delay_seconds: float = 1.5,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        current_snapshot = self.snapshot()
+        current_metrics = current_snapshot.get("metrics") if isinstance(current_snapshot.get("metrics"), dict) else {}
+        cpu_usage = float(current_metrics.get("cpu_percent") or 0.0)
+        file_rate = float(current_metrics.get("files_per_second") or 0.0)
+        dna_mismatch_count = 0
+        core_pipeline_value = current_snapshot.get("core_pipeline")
+        core_pipeline_state = core_pipeline_value if isinstance(core_pipeline_value, dict) else {}
+        if isinstance(core_pipeline_state, dict):
+            threat_value = core_pipeline_state.get("threat")
+            threat_state = threat_value if isinstance(threat_value, dict) else {}
+            threat_metrics_value = threat_state.get("metrics")
+            threat_metrics = threat_metrics_value if isinstance(threat_metrics_value, dict) else {}
+            dna_mismatch_count = self._to_int(threat_metrics.get("dna_mismatch_count"))
+
+        detection_context: dict[str, Any] | None = None
+        if self.detection_service is not None:
+            detection_context = self.detection_service.calculate_detection(
+                monitored_paths=self.protected_directories,
+                cpu_usage=cpu_usage,
+                file_activity_rate=file_rate,
+                dna_mismatch_count=dna_mismatch_count,
+            )
+            suspicious_processes = detection_context.get("suspicious_processes")
+            if isinstance(suspicious_processes, list) and suspicious_processes:
+                top_process = max(suspicious_processes, key=lambda item: float(item.get("score") or 0.0))
+                if isinstance(top_process, dict):
+                    process_pid = int(top_process.get("pid") or 0)
+                    detection_context["process_pid"] = process_pid
+                    detection_context["process_tree"] = (
+                        self.detection_service.get_process_tree(process_pid)
+                        if self.detection_service is not None
+                        else []
+                    )
+
+        detection_latency_ms = (time.perf_counter() - started_at) * 1000.0
+        self._record_performance_sample("detection", detection_latency_ms)
+
+        threat_detected = bool(detection_context and detection_context.get("threat_detected"))
+        entropy_triggered = bool(detection_context and detection_context.get("entropy_triggered"))
+        confidence = float(detection_context.get("confidence") or 0.0) if detection_context else 0.0
+        queue_overloaded = self.action_queue.qsize() >= self._max_intervention_queue_size
+        should_queue = threat_detected and not queue_overloaded and self.safe_intervention_service is not None
+
+        if should_queue:
+            with self._performance_lock:
+                self._intervention_tasks_queued += 1
+
+            self.action_queue.put(
+                {
+                    "queued_at": time.perf_counter(),
+                    "monitored_paths": list(self.protected_directories),
+                    "detection_context": detection_context,
+                    "lookback_seconds": lookback_seconds,
+                    "cpu_threshold": cpu_threshold,
+                    "terminate_threshold": terminate_threshold,
+                    "recheck_delay_seconds": recheck_delay_seconds,
+                }
+            )
+
+            self.database.log_event(
+                {
+                    "event": "intervention_queued",
+                    "event_type": "info",
+                    "action": "queued",
+                    "file_name": "",
+                    "file_path": "",
+                    "cpu_usage": cpu_usage,
+                    "file_rate": file_rate,
+                    "queue_size": int(self.action_queue.qsize()),
+                    "threat_confidence": confidence,
+                }
+            )
+
+        response = {
+            "status": "SAFE",
+            "threat_detected": threat_detected,
+            "confidence": confidence,
+            "entropy_triggered": entropy_triggered,
+            "actions": ["queued_for_intervention"] if should_queue else [],
+            "files_protected": 0,
+            "files_recovered": 0,
+            "queued": should_queue,
+            "queue_overloaded": queue_overloaded,
+            "queue_size": int(self.action_queue.qsize()),
+            "detection_latency_ms": round(detection_latency_ms, 2),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        return response
+
     def _pipeline_loop(self) -> None:
         while not self._pipeline_stop_event.wait(1.0):
             if self.pipeline is None:
@@ -708,7 +1001,6 @@ class SystemController:
                 status,
             )
         except (OSError, sqlite3.Error):
-            # Continue threat handling even if metric persistence is temporarily unavailable.
             pass
 
         if score >= warning_threshold:
@@ -1386,6 +1678,7 @@ class SystemController:
             return self.snapshot()
 
         self.protected_directories = discover_protected_directories()
+        self._configure_safe_intervention_services()
         if self._honeytrap_enabled:
             self._honeytrap_paths = self._seed_honeytrap_files()
         self._pipeline_stop_event.set()
@@ -1671,6 +1964,16 @@ class SystemController:
                 "Early Threat Detection triggered",
                 "warning",
             ),
+            "entropy_alert": (
+                "SUSPICIOUS_ACTIVITY",
+                "High file entropy indicates likely encryption",
+                "warning",
+            ),
+            "backup_folder_access": (
+                "SUSPICIOUS_ACTIVITY",
+                "Backup folder access was detected",
+                "warning",
+            ),
             "pre_attack_warning": (
                 "SUSPICIOUS_ACTIVITY",
                 "Early Threat Detection triggered",
@@ -1696,6 +1999,26 @@ class SystemController:
                 "Active Threat Neutralization executed",
                 "critical",
             ),
+            "process_suspended": (
+                "PROCESS_SUSPENDED",
+                "Suspicious process was temporarily suspended",
+                "critical",
+            ),
+            "file_protection_enabled": (
+                "FILE_PROTECTION",
+                "Write access was temporarily restricted",
+                "critical",
+            ),
+            "network_isolation_attempted": (
+                "NETWORK_ISOLATION",
+                "Network isolation was attempted",
+                "critical",
+            ),
+            "backup_created": (
+                "FILES_BACKED_UP",
+                "Active files were backed up before containment",
+                "info",
+            ),
             "automatic_system_recovery": (
                 "FILES_RESTORED",
                 "Automatic System Recovery restored files",
@@ -1706,10 +2029,20 @@ class SystemController:
                 "Automatic System Recovery restored files",
                 "info",
             ),
+            "process_terminated": (
+                "PROCESS_TERMINATED",
+                "Malicious process was terminated after re-evaluation",
+                "critical",
+            ),
             "system_safe": (
                 "SYSTEM_SAFE",
                 "System returned to safe state",
                 "safe",
+            ),
+            "incident_package_created": (
+                "EVIDENCE_COLLECTED",
+                "Attack evidence package was generated",
+                "info",
             ),
             "recovery_completed": (
                 "SYSTEM_SAFE",
@@ -1816,6 +2149,15 @@ def register_routes(flask_app: Flask) -> None:
             {
                 "metrics": data["metrics"],
                 "history": controller.database.fetch_metrics(120),
+            }
+        )
+
+    @flask_app.route("/api/performance", methods=["GET"])
+    def performance() -> Any:
+        controller = _controller_from_app(flask_app)
+        return jsonify(
+            {
+                "performance": controller.performance_snapshot(),
             }
         )
 
@@ -1946,6 +2288,22 @@ def register_routes(flask_app: Flask) -> None:
             return jsonify({"message": "simulation_failed", "error": str(error)}), 500
         except OSError as error:
             return jsonify({"message": "simulation_failed", "error": str(error)}), 500
+
+        return jsonify(result)
+
+    @flask_app.route("/api/intervention/handle", methods=["POST"])
+    def handle_attack() -> Any:
+        controller = _controller_from_app(flask_app)
+        body = request.get_json(silent=True) or {}
+        try:
+            result = controller.handle_attack(
+                lookback_seconds=float(body.get("lookback_seconds", 5.0)),
+                cpu_threshold=float(body.get("cpu_threshold", 65.0)),
+                terminate_threshold=float(body.get("terminate_threshold", 60.0)),
+                recheck_delay_seconds=float(body.get("recheck_delay_seconds", 1.5)),
+            )
+        except (TypeError, ValueError) as error:
+            return jsonify({"message": "invalid_intervention_parameters", "error": str(error)}), 400
 
         return jsonify(result)
 

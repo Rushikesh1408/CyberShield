@@ -1,0 +1,28 @@
+{
+  "critical_issues": [
+    "harness:fatal_error - [Errno 13] Permission denied: 'D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\monitored\\\\qa_backup_restore_probe.txt'"
+  ],
+  "failed": 1,
+  "final_verdict": "NEEDS FIXES",
+  "observations": [
+    "api: {\"avg_latency_ms\": 8.97, \"p95_latency_ms\": 20.12}"
+  ],
+  "passed": 36,
+  "phases": {
+    "api": "PASS",
+    "attack_simulation": "PASS",
+    "backup_restore": "FAIL",
+    "baseline": "PASS",
+    "edge_cases": "FAIL",
+    "entropy": "PASS",
+    "forensic": "FAIL",
+    "stress": "FAIL",
+    "timeline": "FAIL"
+  },
+  "system_score": 4.0,
+  "total_tests": 37,
+  "warnings": [
+    "attack_simulation:low_expected_early_detection - Expected SUSPICIOUS_ACTIVITY not present after low simulation",
+    "attack_simulation:medium_expected_containment_signals - No medium-level containment signals observed"
+  ]
+}

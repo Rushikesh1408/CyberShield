@@ -30,6 +30,9 @@ def calculate_threat_score(
     file_activity_count: int,
     cpu_usage: float,
     dna_mismatch_count: int,
+    entropy: float = 0.0,
+    entropy_threshold_hit: bool = False,
+    process_risk: float = 0.0,
     idle_seconds: float = 0.0,
     max_file_activity: int = 200,
     max_dna_mismatch: int = 20,
@@ -42,12 +45,18 @@ def calculate_threat_score(
     file_activity_score = _clamp01(float(file_activity_count) / float(safe_max_file_activity))
     cpu_score = _clamp01(float(cpu_usage) / 100.0)
     dna_score = _clamp01(float(dna_mismatch_count) / float(safe_max_dna_mismatch))
+    entropy_score = _clamp01((float(entropy) - 5.0) / 3.0)
+    process_risk_score = _clamp01(float(process_risk))
 
     weighted_score = (
-        0.6 * file_activity_score
+        0.45 * file_activity_score
         + 0.15 * cpu_score
-        + 0.25 * dna_score
+        + 0.2 * dna_score
+        + 0.1 * entropy_score
+        + 0.1 * process_risk_score
     )
+    if entropy_threshold_hit:
+        weighted_score += 0.05
     idle_decay_factor = 1.0
     if idle_seconds >= 240.0:
         idle_decay_factor = 0.0
