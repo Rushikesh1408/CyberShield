@@ -2082,6 +2082,37 @@ class SystemController:
 
         return entries
 
+    def network_activity(self) -> dict[str, Any]:
+        recent_logs = self.database.fetch_logs(100)
+        events = [log for log in recent_logs if "network" in str(log.get("message") or "").lower()]
+        return {
+            "events": events,
+            "recent": events[:10],
+            "count": len(events),
+        }
+
+    def signature_intelligence(self) -> dict[str, Any]:
+        fingerprints = self.database.fetch_fingerprints()
+        latest = fingerprints[0] if fingerprints else {}
+        return {
+            "latest": latest,
+            "correlation": {"matched": False, "matches": []},
+            "history": fingerprints[:10],
+        }
+
+    def forensic_report_summary(self) -> dict[str, Any]:
+        alerts = self.database.fetch_alerts(20)
+        fingerprints = self.database.fetch_fingerprints()
+        latest = fingerprints[0] if fingerprints else {}
+        return {
+            "latest": latest,
+            "reports": alerts[:10],
+            "wallets": [],
+            "persistence": [],
+            "process_tree": [],
+            "entry_point": {},
+        }
+
 
 def _controller_from_app(flask_app: Flask) -> SystemController:
     controller = flask_app.extensions.get("cybershield_controller")
@@ -2169,6 +2200,14 @@ def register_routes(flask_app: Flask) -> None:
     def logs() -> Any:
         return jsonify({"logs": _controller_from_app(flask_app).database.fetch_logs(100)})
 
+    @flask_app.route("/api/network", methods=["GET"])
+    def network() -> Any:
+        return jsonify(_controller_from_app(flask_app).network_activity())
+
+    @flask_app.route("/api/signature", methods=["GET"])
+    def signature() -> Any:
+        return jsonify(_controller_from_app(flask_app).signature_intelligence())
+
     @flask_app.route("/api/logs/clear", methods=["POST"])
     def clear_logs() -> Any:
         deleted = _controller_from_app(flask_app).database.clear_logs()
@@ -2246,6 +2285,9 @@ def register_routes(flask_app: Flask) -> None:
     @flask_app.route("/api/report", methods=["GET"])
     def get_report() -> Any:
         report_path = _controller_from_app(flask_app).get_attack_report_path()
+        if request.args.get("format", "").strip().lower() == "json":
+            return jsonify(_controller_from_app(flask_app).forensic_report_summary())
+
         if not report_path.exists():
             return jsonify({"message": "report_not_found"}), 404
 
