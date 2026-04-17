@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import ActivityChart from '../components/ActivityChart';
+import AttackStoryPanel from '../components/AttackStoryPanel';
 import AttackInsightsPanel from '../components/AttackInsightsPanel';
 import AlertsPanel from '../components/AlertsPanel';
 import BackupRecoveryPanel from '../components/BackupRecoveryPanel';
 import EmergencyPanel from '../components/EmergencyPanel';
 import FingerprintPanel from '../components/FingerprintPanel';
 import LogsTimeline from '../components/LogsTimeline';
+import ProofPanel from '../components/ProofPanel';
 import StatusCard from '../components/StatusCard';
 import SystemTimelinePanel from '../components/SystemTimelinePanel';
 import InterventionPanel from '../components/InterventionPanel';
@@ -59,6 +61,19 @@ const initialSnapshot = {
   alerts: [],
   logs: [],
   fingerprints: [],
+};
+
+const initialAttackStory = {
+  attackSourcePath: '',
+  processDisplay: '',
+  filesAffected: 0,
+  actionTaken: '',
+  finalStatus: 'SAFE',
+  timeline: {
+    detected: false,
+    terminated: false,
+    restored: false,
+  },
 };
 
 function timeLabel(timestamp) {
@@ -149,6 +164,7 @@ export default function DashboardPage() {
     files_recovered: 0,
   });
   const [timeline, setTimeline] = useState([]);
+  const [attackStory, setAttackStory] = useState(initialAttackStory);
   const [error, setError] = useState('');
 
   const loadSystemIntelligence = async () => {
@@ -336,6 +352,117 @@ export default function DashboardPage() {
     })),
     [history],
   );
+
+  useEffect(() => {
+    const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
+    const attackEvents = new Set([
+      'attack_detected',
+      'process_killed',
+      'process_suspended',
+      'active_threat_neutralization',
+      'automatic_system_recovery',
+      'files_restored',
+      'file_restored',
+      'attack_report_generated',
+    ]);
+
+    const latestAttackLog = logs.find((item) => {
+      const event = String(item?.event || '').toLowerCase();
+      const eventType = String(item?.event_type || item?.level || '').toLowerCase();
+      return attackEvents.has(event) || eventType === 'critical';
+    });
+
+    const metadata = latestAttackLog?.metadata && typeof latestAttackLog.metadata === 'object'
+      ? latestAttackLog.metadata
+      : {};
+
+    const monitoredPaths = Array.isArray(metadata.paths) ? metadata.paths : [];
+    const sourcePath = String(
+      latestAttackLog?.file_path || metadata.file_path || monitoredPaths[0] || metadata.destination_path || '',
+    );
+
+    const processName = String(
+      latestAttackLog?.process_name || metadata.process_name || metadata.top_process || '',
+    ).trim();
+    const processPid = Number(metadata.pid ?? metadata.process_pid ?? 0);
+    const processDisplay = processName
+      ? processPid > 0
+        ? `${processName} (PID ${processPid})`
+        : processName
+      : processPid > 0
+        ? `PID ${processPid}`
+        : '';
+
+    const affectedFromLogs = Number(
+      metadata.files_affected ?? metadata.modifications ?? metadata.file_activity_count ?? 0,
+    );
+    const filesAffected = Math.max(
+      Number(attackSummary.files_encrypted ?? 0),
+      affectedFromLogs,
+    );
+
+    const timelineStates = new Set(
+      (Array.isArray(timeline) ? timeline : []).map((item) => String(item?.state || '').toUpperCase()),
+    );
+    const detected = timelineStates.has('ATTACK_DETECTED') || Boolean(latestAttackLog);
+    const terminated =
+      timelineStates.has('PROCESS_TERMINATED') ||
+      timelineStates.has('PROCESS_SUSPENDED') ||
+      ['process_killed', 'process_suspended', 'active_threat_neutralization'].includes(
+        String(latestAttackLog?.event || '').toLowerCase(),
+      );
+    const restored =
+      timelineStates.has('FILES_RESTORED') ||
+      ['automatic_system_recovery', 'files_restored', 'file_restored'].includes(
+        String(latestAttackLog?.event || '').toLowerCase(),
+      ) ||
+      Number(attackSummary.files_recovered || 0) > 0;
+
+    const actionParts = [];
+    if (terminated) {
+      actionParts.push('Process terminated');
+    }
+    if (restored) {
+      actionParts.push('files restored');
+    }
+    if (!terminated && !restored && detected) {
+      actionParts.push('Threat detected and queued');
+    }
+
+    const nextStory = {
+      attackSourcePath: sourcePath,
+      processDisplay,
+      filesAffected,
+      actionTaken: actionParts.join(' + '),
+      finalStatus: String(snapshot.status || 'SAFE').toUpperCase(),
+      timeline: {
+        detected,
+        terminated,
+        restored,
+      },
+    };
+
+    const hasSignal = Boolean(sourcePath || processDisplay || filesAffected > 0 || detected);
+
+    setAttackStory((current) => {
+      if (hasSignal) {
+        return nextStory;
+      }
+      if (current.attackSourcePath || current.processDisplay || current.filesAffected > 0) {
+        return {
+          ...current,
+          finalStatus: nextStory.finalStatus,
+          timeline: nextStory.timeline.detected || nextStory.timeline.terminated || nextStory.timeline.restored
+            ? nextStory.timeline
+            : current.timeline,
+        };
+      }
+      return {
+        ...current,
+        finalStatus: nextStory.finalStatus,
+      };
+    });
+  }, [attackSummary.files_encrypted, attackSummary.files_recovered, snapshot.logs, snapshot.status, timeline]);
 
   const handleStart = async () => {
     setBusy(true);
@@ -711,10 +838,19 @@ export default function DashboardPage() {
           </div>
         </section>
 
+        <ProofPanel
+          filesProtected={Math.max(Number(fileStats.files_protected ?? 0), Number(attackSummary.files_protected ?? 0))}
+          filesEncrypted={Number(attackSummary.files_encrypted ?? 0)}
+          filesRecovered={Math.max(Number(fileStats.files_recovered ?? 0), Number(attackSummary.files_recovered ?? 0))}
+          threatConfidence={threatConfidence}
+        />
+
         <section className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
           <ActivityChart data={chartData} />
           <AlertsPanel alerts={snapshot.alerts} />
         </section>
+
+        <AttackStoryPanel story={attackStory} />
 
         <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
           <AttackInsightsPanel
