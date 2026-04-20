@@ -8,10 +8,14 @@ from flask import Flask
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from backend.api import init_socketio
     from backend.api import register_routes
+    from backend.api import socketio
     from backend.config import AppConfig
 else:
+    from .api import init_socketio
     from .api import register_routes
+    from .api import socketio
     from .config import AppConfig
 
 
@@ -39,6 +43,7 @@ def create_app() -> Flask:
     config = AppConfig.from_env()
     flask_app.config.from_mapping(config.flask_mapping())
     register_routes(flask_app)
+    init_socketio(flask_app)
     return flask_app
 
 
@@ -47,7 +52,8 @@ app = create_app()
 
 if __name__ == "__main__":
     runtime_config = AppConfig.from_env()
-    app.run(
+    socketio.run(
+        app,
         host=runtime_config.host,
         port=runtime_config.port,
         debug=runtime_config.debug,
