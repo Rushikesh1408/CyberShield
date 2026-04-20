@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import json
+import uuid
 import smtplib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.request
 
 from flask import Flask, jsonify, request, send_file
+from flask_socketio import SocketIO
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -81,6 +83,123 @@ HONEYTRAP_BURST_THRESHOLD_ENV = "CYBERSHIELD_HONEYTRAP_BURST_THRESHOLD"
 HONEYTRAP_BURST_WINDOW_ENV = "CYBERSHIELD_HONEYTRAP_BURST_WINDOW_SECONDS"
 HONEYTRAP_AUTO_ISOLATE_ENV = "CYBERSHIELD_HONEYTRAP_AUTO_ISOLATE"
 HONEYTRAP_ISOLATION_MODE_ENV = "CYBERSHIELD_HONEYTRAP_ISOLATION_MODE"
+SOCKET_API_KEY_ENV = "CYBERSHIELD_SOCKET_API_KEY"
+DEFAULT_SOCKET_API_KEY = "CYBERSHIELD_SECURE_KEY"
+SOCKET_EVENT_NAME = "cybershield_event"
+
+socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
+_socket_health_lock = threading.Lock()
+_connected_clients = 0
+_last_event_timestamp = time.time()
+_last_ack_timestamp = 0.0
+_emitted_events = 0
+_acked_events = 0
+_monitoring_min_emit_interval_seconds = 0.75
+_last_monitoring_emit_timestamp = 0.0
+
+
+def init_socketio(flask_app: Flask) -> None:
+    socketio.init_app(flask_app, cors_allowed_origins="*")
+
+
+def emit_event(event_type: str, data: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    global _last_event_timestamp
+    global _emitted_events
+    global _last_monitoring_emit_timestamp
+
+    normalized_event_type = str(event_type or "UNKNOWN")
+    current_timestamp = time.time()
+
+    # Prevent monitoring update bursts from overwhelming clients.
+    if normalized_event_type == "MONITORING_UPDATE":
+        with _socket_health_lock:
+            if current_timestamp - _last_monitoring_emit_timestamp < _monitoring_min_emit_interval_seconds:
+                return None
+            _last_monitoring_emit_timestamp = current_timestamp
+
+    with _socket_health_lock:
+        _last_event_timestamp = current_timestamp
+        _emitted_events += 1
+
+    payload = {
+        "type": normalized_event_type,
+        "event_id": str(uuid.uuid4()),
+        "timestamp": current_timestamp,
+        "data": data or {},
+    }
+
+    # Dispatch from a background task so emit path remains non-blocking.
+    socketio.start_background_task(socketio.emit, SOCKET_EVENT_NAME, payload)
+    return payload
+
+
+@socketio.on("connect")
+def handle_socket_connect(auth: dict[str, Any] | None) -> bool | None:
+    global _connected_clients
+
+    configured_api_key = str(os.environ.get(SOCKET_API_KEY_ENV, DEFAULT_SOCKET_API_KEY) or "").strip()
+    if not configured_api_key:
+        with _socket_health_lock:
+            _connected_clients += 1
+        return None
+
+    provided_api_key = ""
+    if isinstance(auth, dict):
+        provided_api_key = str(auth.get("apiKey") or "").strip()
+
+    if provided_api_key != configured_api_key:
+        return False
+
+    with _socket_health_lock:
+        _connected_clients += 1
+
+    return None
+
+
+@socketio.on("disconnect")
+def handle_socket_disconnect() -> None:
+    global _connected_clients
+
+    with _socket_health_lock:
+        _connected_clients = max(0, _connected_clients - 1)
+
+
+@socketio.on("cybershield_event_ack")
+def handle_socket_event_ack(payload: dict[str, Any] | None) -> None:
+    global _acked_events
+    global _last_ack_timestamp
+
+    if not isinstance(payload, dict):
+        return
+
+    event_id = str(payload.get("event_id") or "").strip()
+    if not event_id:
+        return
+
+    with _socket_health_lock:
+        _acked_events += 1
+        _last_ack_timestamp = time.time()
+
+
+def realtime_health_snapshot() -> dict[str, Any]:
+    with _socket_health_lock:
+        connected_clients = int(_connected_clients)
+        last_event_timestamp = float(_last_event_timestamp)
+        last_ack_timestamp = float(_last_ack_timestamp)
+        emitted_events = int(_emitted_events)
+        acked_events = int(_acked_events)
+
+    socket_active = bool(getattr(socketio, "server", None))
+    status = "healthy" if socket_active else "degraded"
+    return {
+        "socket_active": socket_active,
+        "connected_clients": connected_clients,
+        "last_event_timestamp": last_event_timestamp,
+        "last_ack_timestamp": last_ack_timestamp,
+        "emitted_events": emitted_events,
+        "acked_events": acked_events,
+        "status": status,
+    }
 
 
 def _existing_directories(candidates: list[Path]) -> list[Path]:
@@ -324,6 +443,8 @@ class SystemController:
         self._honeytrap_hits = 0
         self._last_honeytrap_trigger_at = 0.0
         self._honeytrap_lock = threading.Lock()
+        self._last_monitor_event_emitted_at = 0.0
+        self._monitor_event_interval_seconds = 2.0
         if self._honeytrap_enabled:
             self._honeytrap_paths = self._seed_honeytrap_files()
         self._start_engine()
@@ -618,6 +739,15 @@ class SystemController:
                 "burst_count": burst_count,
                 "burst_window_seconds": self._honeytrap_burst_window_seconds,
             }
+        )
+        emit_event(
+            "SOS_TRIGGERED",
+            {
+                "severity": "HIGH",
+                "reason": "honeytrap_triggered",
+                "burst_count": int(burst_count),
+                "file": file_path,
+            },
         )
 
         if self._honeytrap_auto_isolate:
@@ -991,6 +1121,20 @@ class SystemController:
         cpu_usage = float(metrics.get("cpu_usage") or 0.0)
         dna_mismatch_count = self._to_int(metrics.get("dna_mismatch_count"))
 
+        now = time.time()
+        if now - self._last_monitor_event_emitted_at >= self._monitor_event_interval_seconds:
+            self._last_monitor_event_emitted_at = now
+            emit_event(
+                "MONITORING_UPDATE",
+                {
+                    "status": "UNDER_ATTACK" if triggered else "SAFE",
+                    "confidence": int(score),
+                    "cpu_usage": round(cpu_usage, 2),
+                    "files_per_second": round(files_per_second, 2),
+                    "dna_mismatch_count": int(dna_mismatch_count),
+                },
+            )
+
         status = "UNDER_ATTACK" if triggered else "SAFE"
         try:
             self.database.insert_metrics(
@@ -1061,6 +1205,16 @@ class SystemController:
                         "accesses": activity_count,
                         "dna_mismatch_count": dna_mismatch_count,
                     }
+                )
+                emit_event(
+                    "ATTACK_DETECTED",
+                    {
+                        "confidence": int(score),
+                        "files_affected": int(activity_count),
+                        "source": str(self._dominant_activity_extension()),
+                        "cpu_usage": round(cpu_usage, 2),
+                        "file_rate": round(files_per_second, 2),
+                    },
                 )
 
                 self._record_attack_fingerprint(
@@ -1180,6 +1334,13 @@ class SystemController:
                     "score": score,
                     "level": level,
                 }
+            )
+            emit_event(
+                "SYSTEM_SAFE",
+                {
+                    "status": "SAFE",
+                    "confidence": int(score),
+                },
             )
 
     def _dominant_activity_extension(self) -> str:
@@ -1461,6 +1622,17 @@ class SystemController:
         ):
             return
 
+        emit_event(
+            "SOS_TRIGGERED",
+            {
+                "severity": "HIGH",
+                "threat_confidence": int(score),
+                "threat_level": str(level).upper(),
+                "cpu_usage": round(float(cpu_usage), 2),
+                "file_rate": round(float(file_rate), 2),
+            },
+        )
+
         emergency_email = self.get_emergency_contact().strip()
         if not emergency_email:
             if self._emergency_alert_skip_logged_for_attack:
@@ -1658,6 +1830,13 @@ class SystemController:
                 "restored_files": user_visible_restored[:40],
                 "restored_raw_files": normalized_restored[:40],
             }
+        )
+        emit_event(
+            "FILES_RESTORED",
+            {
+                "recovered": int(restored_count),
+                "files": user_visible_restored[:20],
+            },
         )
 
         self.database.insert_alert(
@@ -2143,6 +2322,41 @@ def register_routes(flask_app: Flask) -> None:
             }
         )
 
+    @flask_app.route("/api/realtime/health", methods=["GET"])
+    def realtime_health() -> Any:
+        return jsonify(realtime_health_snapshot())
+
+    @flask_app.route("/api/realtime/selftest", methods=["POST"])
+    def realtime_selftest() -> Any:
+        payload = request.get_json(silent=True) if request.data else {}
+        source = "qa_stress_runner"
+        if isinstance(payload, dict):
+            source = str(payload.get("source") or source)
+
+        emitted: list[str] = []
+        for event_type in ("ATTACK_DETECTED", "FILES_RESTORED", "SYSTEM_SAFE"):
+            event_payload = emit_event(
+                event_type,
+                {
+                    "source": source,
+                    "selftest": True,
+                    "files_affected": 1 if event_type == "ATTACK_DETECTED" else 0,
+                    "recovered": 1 if event_type == "FILES_RESTORED" else 0,
+                    "confidence": 92 if event_type == "ATTACK_DETECTED" else 100,
+                },
+            )
+            if isinstance(event_payload, dict):
+                emitted.append(str(event_payload.get("event_id") or ""))
+            time.sleep(0.08)
+
+        return jsonify(
+            {
+                "ok": True,
+                "emitted_count": len(emitted),
+                "event_ids": emitted,
+            }
+        )
+
     @flask_app.route("/api/status", methods=["GET"])
     def status() -> Any:
         data = _controller_from_app(flask_app).snapshot()
@@ -2392,4 +2606,5 @@ def create_app() -> Flask:
     config_obj = AppConfig.from_env()
     app_instance.config.from_mapping(config_obj.flask_mapping())
     register_routes(app_instance)
+    init_socketio(app_instance)
     return app_instance

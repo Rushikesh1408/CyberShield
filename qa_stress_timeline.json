@@ -1,0 +1,230 @@
+[
+  {
+    "timestamp": 1776593723.1492908,
+    "phase": "startup",
+    "name": "frontend_started",
+    "data": {
+      "pid": 24632
+    }
+  },
+  {
+    "timestamp": 1776593723.152665,
+    "phase": "socket",
+    "name": "connected",
+    "data": {
+      "sid": "NyfxOeE6Em8k2Zi1AAAC"
+    }
+  },
+  {
+    "timestamp": 1776593723.1540654,
+    "phase": "PHASE_1_SYSTEM_HEALTH",
+    "name": "health_polled",
+    "data": {
+      "ok": true,
+      "latency_ms": 1.238600000021961,
+      "payload": {
+        "acked_events": 0,
+        "connected_clients": 1,
+        "emitted_events": 3,
+        "last_ack_timestamp": 0.0,
+        "last_event_timestamp": 1776593573.1896389,
+        "socket_active": true,
+        "status": "healthy",
+        "data_loss": 0
+      }
+    }
+  },
+  {
+    "timestamp": 1776593723.1540682,
+    "phase": "PHASE_1_SYSTEM_HEALTH",
+    "name": "health_validated",
+    "data": {
+      "connected_clients": 1
+    }
+  },
+  {
+    "timestamp": 1776593724.4647424,
+    "phase": "PHASE_2_BASELINE_PERFORMANCE",
+    "name": "baseline_measured",
+    "data": {
+      "samples": 8,
+      "latency_ms": 13.311312499993733
+    }
+  },
+  {
+    "timestamp": 1776593724.5595713,
+    "phase": "PHASE_3_ATTACK_SIMULATION",
+    "name": "simulator_setup_done",
+    "data": {}
+  },
+  {
+    "timestamp": 1776593754.920603,
+    "phase": "PHASE_3_ATTACK_SIMULATION",
+    "name": "attack_complete",
+    "data": {
+      "runtime_ms": 30361.0018,
+      "detection_latency_ms": 260.2052688598633,
+      "simulator_stdout": "t\",\n  \"dna_iterations\": 32,\n  \"fallback_backup_recovered\": {\n    \"recovered\": [],\n    \"failed\": [],\n    \"cleaned_encrypted\": []\n  },\n  \"normalized_state\": {\n    \"renamed_back\": [],\n    \"removed_encrypted\": [\n      \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\e2e_stress_target\\\\notes.txt.enc\",\n      \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\e2e_stress_target\\\\project.docx.enc\",\n      \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\e2e_stress_target\\\\report.pdf.enc\"\n    ],\n    \"skipped_locked\": []\n  },\n  \"rollback_cleanup\": {\n    \"removed\": [],\n    \"skipped_locked\": []\n  },\n  \"internal_cleanup\": {\n    \"removed\": [\n      \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\e2e_stress_target\\\\.cybershield_simulation_state.json\",\n      \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\e2e_stress_target\\\\.cybershield_dna_signal_probe.txt\"\n    ],\n    \"skipped_locked\": []\n  }\n}\n"
+    }
+  },
+  {
+    "timestamp": 1776593755.1697412,
+    "phase": "socket",
+    "name": "event_received",
+    "data": {
+      "event_type": "ATTACK_DETECTED",
+      "delay_ms": 242.9656982421875
+    }
+  },
+  {
+    "timestamp": 1776593755.170075,
+    "phase": "socket",
+    "name": "event_received",
+    "data": {
+      "event_type": "FILES_RESTORED",
+      "delay_ms": 162.71042823791504
+    }
+  },
+  {
+    "timestamp": 1776593755.1703253,
+    "phase": "socket",
+    "name": "event_received",
+    "data": {
+      "event_type": "SYSTEM_SAFE",
+      "delay_ms": 82.56936073303223
+    }
+  },
+  {
+    "timestamp": 1776593755.3694346,
+    "phase": "PHASE_4_REALTIME_SYNC",
+    "name": "sync_checked",
+    "data": {
+      "expected": [
+        "ATTACK_DETECTED",
+        "FILES_RESTORED",
+        "SYSTEM_SAFE"
+      ],
+      "seen": [
+        "ATTACK_DETECTED",
+        "FILES_RESTORED",
+        "SYSTEM_SAFE"
+      ],
+      "missing": [],
+      "propagation_samples": 3
+    }
+  },
+  {
+    "timestamp": 1776593763.3977356,
+    "phase": "PHASE_5_STRESS_LOAD",
+    "name": "stress_complete",
+    "data": {
+      "writes": 420,
+      "health_failures": 0
+    }
+  },
+  {
+    "timestamp": 1776593769.45942,
+    "phase": "PHASE_6_RECOVERY_VALIDATION",
+    "name": "recovery_checked",
+    "data": {
+      "status": "SAFE",
+      "data_loss": 0,
+      "safe_recovered": true,
+      "snapshot": {
+        "backup_root": "D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\backup",
+        "confidence": 0,
+        "core_pipeline": {
+          "backup": {
+            "backup_root": "D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\backup",
+            "backup_versions": 0,
+            "files_secured": 0,
+            "last_backup_time": null,
+            "recent_files": []
+          },
+          "is_running": true,
+          "last_assessment": {
+            "actions": [],
+            "level": "LOW",
+            "metrics": {
+              "active_processes": 319,
+              "cpu_usage": 3.4,
+              "dna_mismatch_count": 0,
+              "file_activity_count": 0,
+              "file_activity_rate": 0.0,
+              "tracked_files": 9
+            },
+            "score": 0,
+            "status": "SAFE",
+            "timestamp": 1776593769.4567404,
+            "trigger_threshold": 45,
+            "triggered": false
+          },
+          "network_mode": "safe",
+          "threat": {
+            "actions": [],
+            "level": "LOW",
+            "metrics": {
+              "active_processes": 319,
+              "cpu_usage": 3.4,
+              "dna_mismatch_count": 0,
+              "file_activity_count": 0,
+              "file_activity_rate": 0.0,
+              "tracked_files": 9
+            },
+            "score": 0,
+            "status": "SAFE",
+            "timestamp": 1776593769.4567404,
+            "trigger_threshold": 45,
+            "triggered": false
+          },
+          "watch_paths": [
+            "D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\test_folder\\qa_runtime\\e2e_stress_target"
+          ]
+        },
+        "honeytrap": {
+          "decoy_files": 3,
+          "enabled": true,
+          "hits": 2
+        },
+        "is_monitoring": true,
+        "metrics": {
+          "accesses": 0,
+          "cpu_percent": 3.4,
+          "cpu_percent_raw": 3.4,
+          "cpu_percent_sampled": 3.4,
+          "files_per_second": 0.0,
+          "modifications": 0,
+          "status": "SAFE",
+          "threat_confidence": 0
+        },
+        "monitor_paths": [
+          "D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\test_folder\\qa_runtime\\e2e_stress_target"
+        ],
+        "monitoring_message": "Monitoring: Protected System Directories (Auto-configured)",
+        "status": "SAFE"
+      }
+    }
+  },
+  {
+    "timestamp": 1776593769.459527,
+    "phase": "socket",
+    "name": "disconnected",
+    "data": {}
+  },
+  {
+    "timestamp": 1776593770.6650753,
+    "phase": "socket",
+    "name": "connected",
+    "data": {
+      "sid": "mcGLVFblcydGO_pdAAAE"
+    }
+  },
+  {
+    "timestamp": 1776593771.6654322,
+    "phase": "PHASE_7_FAILURE_TESTS",
+    "name": "reconnected",
+    "data": {
+      "connected": true
+    }
+  }
+]
