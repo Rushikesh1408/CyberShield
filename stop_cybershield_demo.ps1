@@ -121,11 +121,9 @@ foreach ($key in @("backend_shell_pid", "frontend_shell_pid")) {
     }
 }
 
-if ($targetPids.Count -eq 0) {
-    $fallbackPids = Get-FallbackCyberShieldProcesses -Repo $RepoRoot -Frontend $FrontendRoot
-    foreach ($procId in $fallbackPids) {
-        [void]$targetPids.Add([int]$procId)
-    }
+$fallbackPids = Get-FallbackCyberShieldProcesses -Repo $RepoRoot -Frontend $FrontendRoot
+foreach ($procId in $fallbackPids) {
+    [void]$targetPids.Add([int]$procId)
 }
 
 $stopped = New-Object System.Collections.Generic.List[int]
