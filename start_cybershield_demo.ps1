@@ -216,6 +216,7 @@ $backendCommand = @"
 Set-Location '$BackendRoot'
 `$env:HOST = '0.0.0.0'
 `$env:PORT = '$BACKEND_PORT'
+`$env:CYBERSHIELD_MONITOR_PATHS = 'E:\mandd\CyberAttack'
 `$env:CYBERSHIELD_SOCKET_API_KEY = '$SOCKET_API_KEY'
 if (Test-Path '.\.venv\Scripts\python.exe') {
     & '.\.venv\Scripts\python.exe' -m backend.app
