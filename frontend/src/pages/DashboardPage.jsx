@@ -96,6 +96,7 @@ function timeLabel(timestamp) {
 }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 /**
  * Fetch JSON from the API.
  * Automatically attaches x-api-key header on every request.
@@ -103,8 +104,29 @@ function timeLabel(timestamp) {
  */
 =======
 function buildActivitySample(metrics, { snapshot, attackSummary, recentLogs, timeline } = {}) {
+=======
+function buildActivitySample(metrics, {
+  snapshot,
+  attackSummary,
+  recentLogs,
+  timeline,
+  isSimulating = false,
+} = {}) {
+>>>>>>> 8e1ff54 (testing and fixing some issues)
   const filesPerSecond = Number(metrics?.files_per_second ?? 0);
   const modifications = Number(metrics?.modifications ?? 0);
+  const metricSignal = Math.max(filesPerSecond, modifications);
+  const isUnderAttack = String(snapshot?.status ?? '').toUpperCase() === 'UNDER_ATTACK' || Boolean(isSimulating);
+
+  // When system is safe and no simulation is running, graph must reflect only real metrics.
+  if (!isUnderAttack) {
+    return {
+      label: timeLabel(new Date().toISOString()),
+      activity_signal: metricSignal,
+      files_per_second: filesPerSecond,
+    };
+  }
+
   const pipelineMetrics = snapshot?.core_pipeline?.last_assessment?.metrics ?? snapshot?.core_pipeline?.threat?.metrics ?? {};
   const pipelineFileRate = Number(pipelineMetrics?.file_activity_rate ?? 0);
   const pipelineFileCount = Number(pipelineMetrics?.file_activity_count ?? 0);
@@ -123,8 +145,7 @@ function buildActivitySample(metrics, { snapshot, attackSummary, recentLogs, tim
   return {
     label: timeLabel(new Date().toISOString()),
     activity_signal: Math.max(
-      filesPerSecond,
-      modifications,
+      metricSignal,
       pipelineFileRate,
       pipelineFileCount,
       encryptedCount,
@@ -367,27 +388,15 @@ export default function DashboardPage() {
           attackSummary,
           recentLogs: nextSnapshot.logs,
           timeline,
+          isSimulating,
         });
         setHistory((currentHistory) => {
-          const mergedSample = latestHistoryPoint
-            ? {
-              ...liveSample,
-              activity_signal: Math.max(
-                Number(liveSample.activity_signal ?? 0),
-                Number(latestHistoryPoint.activity_signal ?? 0),
-              ),
-              files_per_second: Math.max(
-                Number(liveSample.files_per_second ?? 0),
-                Number(latestHistoryPoint.files_per_second ?? 0),
-              ),
-            }
-            : liveSample;
-
           if (currentHistory.length === 0 && graphHistory.length > 0) {
-            return [...graphHistory.slice(-119), mergedSample];
+            // Seed chart from backend history once, then rely on live polling samples.
+            return [...graphHistory.slice(-119), liveSample];
           }
 
-          return [...currentHistory.slice(-119), mergedSample];
+          return [...currentHistory.slice(-119), liveSample];
         });
         return nextSnapshot;
       });
@@ -398,6 +407,7 @@ export default function DashboardPage() {
           attackSummary,
           recentLogs: snapshot.logs,
           timeline,
+          isSimulating,
         });
         return [...currentHistory.slice(-119), liveSample];
       });
