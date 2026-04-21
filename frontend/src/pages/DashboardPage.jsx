@@ -95,11 +95,49 @@ function timeLabel(timestamp) {
   });
 }
 
+<<<<<<< HEAD
 /**
  * Fetch JSON from the API.
  * Automatically attaches x-api-key header on every request.
  * The backend returns {status, data, error} — this helper unwraps `data`.
  */
+=======
+function buildActivitySample(metrics, { snapshot, attackSummary, recentLogs, timeline } = {}) {
+  const filesPerSecond = Number(metrics?.files_per_second ?? 0);
+  const modifications = Number(metrics?.modifications ?? 0);
+  const pipelineMetrics = snapshot?.core_pipeline?.last_assessment?.metrics ?? snapshot?.core_pipeline?.threat?.metrics ?? {};
+  const pipelineFileRate = Number(pipelineMetrics?.file_activity_rate ?? 0);
+  const pipelineFileCount = Number(pipelineMetrics?.file_activity_count ?? 0);
+  const encryptedCount = Number(attackSummary?.files_encrypted ?? 0);
+  const recoveredCount = Number(attackSummary?.files_recovered ?? 0);
+  const attackBoost = snapshot?.status === 'UNDER_ATTACK' ? 25 : 0;
+  const nowMs = Date.now();
+  const recentEventBurst = Array.isArray(recentLogs)
+    ? recentLogs.filter((entry) => {
+      const ts = Date.parse(String(entry?.timestamp ?? ''));
+      return Number.isFinite(ts) && nowMs - ts <= 6000;
+    }).length
+    : 0;
+  const timelinePulse = Array.isArray(timeline) && timeline.length > 0 ? 5 : 0;
+
+  return {
+    label: timeLabel(new Date().toISOString()),
+    activity_signal: Math.max(
+      filesPerSecond,
+      modifications,
+      pipelineFileRate,
+      pipelineFileCount,
+      encryptedCount,
+      recoveredCount,
+      attackBoost,
+      recentEventBurst * 20,
+      timelinePulse,
+    ),
+    files_per_second: Math.max(filesPerSecond, pipelineFileRate, attackBoost, recentEventBurst),
+  };
+}
+
+>>>>>>> 3023950 (testing and fixing some issues)
 async function fetchJson(path, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -244,13 +282,11 @@ export default function DashboardPage() {
   };
 
   const loadSnapshot = async () => {
-    const [statusResult, alertsResult, logsResult, fingerprintsResult, metricsResult] =
+    const [statusResult, logsResult, fingerprintsResult] =
       await Promise.allSettled([
         fetchJson('/api/status'),
-        fetchJson('/api/alerts'),
         fetchJson('/api/logs'),
         fetchJson('/api/fingerprints'),
-        fetchJson('/api/metrics'),
       ]);
 
     setSnapshot((current) => {
@@ -268,10 +304,6 @@ export default function DashboardPage() {
         nextSnapshot.core_pipeline = statusData.core_pipeline ?? initialSnapshot.core_pipeline;
       }
 
-      if (alertsResult.status === 'fulfilled') {
-        nextSnapshot.alerts = alertsResult.value.alerts ?? [];
-      }
-
       if (logsResult.status === 'fulfilled') {
         nextSnapshot.logs = logsResult.value.logs ?? [];
       }
@@ -280,28 +312,14 @@ export default function DashboardPage() {
         nextSnapshot.fingerprints = fingerprintsResult.value.fingerprints ?? [];
       }
 
-      if (metricsResult.status === 'fulfilled') {
-        nextSnapshot.metrics = metricsResult.value.metrics ?? initialSnapshot.metrics;
-        const graphHistory = (metricsResult.value.history ?? []).map((entry) => ({
-          // Keep chart responsive to both short bursts and sustained file churn.
-          activity_signal: Math.max(
-            Number(entry.files_per_second ?? 0),
-            Number(entry.modifications ?? 0),
-          ),
-          label: timeLabel(entry.timestamp),
-          files_per_second: Number(entry.files_per_second ?? 0),
-        }));
-        setHistory(graphHistory);
-      }
-
       return nextSnapshot;
     });
 
-    const requestErrors = [statusResult, alertsResult, logsResult, fingerprintsResult, metricsResult].filter(
+    const requestErrors = [statusResult, logsResult, fingerprintsResult].filter(
       (result) => result.status === 'rejected',
     );
 
-    if (requestErrors.length === 5) {
+    if (requestErrors.length === 3) {
       const firstError = requestErrors[0].reason;
       if (firstError?.name === 'AbortError') {
         setError('Request timeout. Reconnecting to backend...');
@@ -315,18 +333,144 @@ export default function DashboardPage() {
     setLoading(false);
   };
 
+  const loadAlertsLayer = async () => {
+    try {
+      const alertsData = await fetchJson('/api/alerts', {}, 6000);
+      setSnapshot((current) => ({
+        ...current,
+        alerts: Array.isArray(alertsData.alerts) ? alertsData.alerts : [],
+      }));
+    } catch {
+      // Keep last alerts if this layer fails temporarily.
+    }
+  };
+
+  const loadMetricsLayer = async () => {
+    try {
+      const metricsData = await fetchJson('/api/metrics', {}, 6000);
+      setSnapshot((current) => {
+        const nextSnapshot = {
+          ...current,
+          metrics: metricsData.metrics ?? initialSnapshot.metrics,
+        };
+        const graphHistory = (metricsData.history ?? []).map((entry) => ({
+          activity_signal: Math.max(
+            Number(entry.files_per_second ?? 0),
+            Number(entry.modifications ?? 0),
+          ),
+          label: timeLabel(entry.timestamp),
+          files_per_second: Number(entry.files_per_second ?? 0),
+        }));
+        const latestHistoryPoint = graphHistory.length > 0 ? graphHistory[graphHistory.length - 1] : null;
+        const liveSample = buildActivitySample(nextSnapshot.metrics, {
+          snapshot: nextSnapshot,
+          attackSummary,
+          recentLogs: nextSnapshot.logs,
+          timeline,
+        });
+        setHistory((currentHistory) => {
+          const mergedSample = latestHistoryPoint
+            ? {
+              ...liveSample,
+              activity_signal: Math.max(
+                Number(liveSample.activity_signal ?? 0),
+                Number(latestHistoryPoint.activity_signal ?? 0),
+              ),
+              files_per_second: Math.max(
+                Number(liveSample.files_per_second ?? 0),
+                Number(latestHistoryPoint.files_per_second ?? 0),
+              ),
+            }
+            : liveSample;
+
+          if (currentHistory.length === 0 && graphHistory.length > 0) {
+            return [...graphHistory.slice(-119), mergedSample];
+          }
+
+          return [...currentHistory.slice(-119), mergedSample];
+        });
+        return nextSnapshot;
+      });
+    } catch {
+      setHistory((currentHistory) => {
+        const liveSample = buildActivitySample(snapshot.metrics, {
+          snapshot,
+          attackSummary,
+          recentLogs: snapshot.logs,
+          timeline,
+        });
+        return [...currentHistory.slice(-119), liveSample];
+      });
+    }
+  };
+
+  const loadSimulationLayer = async () => {
+    try {
+      const simulationStatus = await fetchJson('/api/simulate/status', {}, 6000);
+      const state = String(simulationStatus.state ?? '').toLowerCase();
+
+      if (state === 'running') {
+        setIsSimulating(true);
+        return;
+      }
+
+      if (state === 'failed') {
+        setIsSimulating(false);
+        setError(String(simulationStatus.error || 'simulation_failed'));
+        return;
+      }
+
+      if (state === 'completed' && isSimulating) {
+        const result = simulationStatus.result ?? {};
+        const summary = result.attack_summary ?? {};
+        const encrypted = Number(summary.files_encrypted ?? 0);
+        const recovered = Number(summary.files_recovered ?? 0);
+        const reportReady = Boolean(result.report_ready);
+
+        setEmergencyMessage(
+          reportReady
+            ? `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report generated.`
+            : `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report still pending.`,
+        );
+        setIsSimulating(false);
+        setError('');
+        await loadSnapshot();
+        await loadAlertsLayer();
+        await loadMetricsLayer();
+        await loadSystemIntelligence();
+        await loadBackupStatus();
+        return;
+      }
+
+      if (state === 'idle' && isSimulating) {
+        setIsSimulating(false);
+      }
+    } catch {
+      // Keep current simulation state if polling fails once.
+    }
+  };
+
   useEffect(() => {
     loadSnapshot();
+    loadAlertsLayer();
+    loadMetricsLayer();
+    loadSimulationLayer();
     loadBackupStatus();
     loadEmergencyContact();
     loadSystemIntelligence();
 
     const snapshotInterval = window.setInterval(loadSnapshot, 2000);
+    const alertsInterval = window.setInterval(loadAlertsLayer, 2000);
+    const metricsInterval = window.setInterval(loadMetricsLayer, 1500);
+    const simulationInterval = window.setInterval(loadSimulationLayer, 1500);
     const backupInterval = window.setInterval(loadBackupStatus, 10000);
     const intelligenceInterval = window.setInterval(loadSystemIntelligence, 4000);
 
     return () => {
       window.clearInterval(snapshotInterval);
+      window.clearInterval(alertsInterval);
+      window.clearInterval(metricsInterval);
+      window.clearInterval(simulationInterval);
       window.clearInterval(backupInterval);
       window.clearInterval(intelligenceInterval);
     };
@@ -506,33 +650,22 @@ export default function DashboardPage() {
   const handleRunAttackSimulation = async () => {
     setIsSimulating(true);
     try {
-      const response = await fetchJson(
+      await fetchJson(
         '/api/simulate/attack',
         {
           method: 'POST',
           body: JSON.stringify({ level: 'high', wait_timeout: 30 }),
         },
-        45000,
+        12000,
       );
-
-      const summary = response.attack_summary ?? {};
-      const encrypted = Number(summary.files_encrypted ?? 0);
-      const recovered = Number(summary.files_recovered ?? 0);
-      const reportReady = Boolean(response.report_ready);
-
-      setEmergencyMessage(
-        reportReady
-          ? `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report generated.`
-          : `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report still pending.`,
-      );
+      setEmergencyMessage('Simulation started. Monitoring progress...');
+      await loadSimulationLayer();
       setError('');
-      await loadSnapshot();
-      await loadBackupStatus();
-      await loadSystemIntelligence();
     } catch (requestError) {
       setError(requestError.message);
-    } finally {
       setIsSimulating(false);
+    } finally {
+      // Keep isSimulating controlled by simulation status polling layer.
     }
   };
 
