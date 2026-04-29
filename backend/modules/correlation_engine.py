@@ -11,6 +11,13 @@ class CorrelationEngine:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
     def correlate(
         self,
         *,
@@ -25,11 +32,16 @@ class CorrelationEngine:
 
         incoming_wallet_set = {wallet.lower() for wallet in (incoming_wallets or []) if wallet}
 
+        known_wallet_set = {
+            str(item.get("wallet_address") or "").lower()
+            for item in (known_wallets or [])
+            if isinstance(item, dict)
+        }
+
         matches: list[dict[str, Any]] = []
         for known in known_signatures:
-            # Compute per-known wallet set
-            per_known_wallets = set()
-            # Try known["wallets"] as a list of dicts with "address" or as a list of strings
+            # Compute per-known wallet set — supports both list-of-dicts and list-of-strings
+            per_known_wallets = set(known_wallet_set)
             wallets_field = known.get("wallets", [])
             if isinstance(wallets_field, list):
                 for w in wallets_field:
@@ -39,12 +51,13 @@ class CorrelationEngine:
                             per_known_wallets.add(str(addr).lower())
                     elif isinstance(w, str):
                         per_known_wallets.add(w.lower())
-            # Also check for a direct wallet_address field
             if "wallet_address" in known:
                 per_known_wallets.add(str(known["wallet_address"]).lower())
+
             wallet_overlap = bool(incoming_wallet_set.intersection(per_known_wallets))
             score = self._score_signature(incoming_signature, known)
             occurrences = self._safe_int(known.get("occurrences"))
+
             if score >= similarity_threshold or wallet_overlap:
                 matches.append(
                     {
@@ -57,13 +70,6 @@ class CorrelationEngine:
 
         matches.sort(key=lambda item: float(item.get("similarity") or 0.0), reverse=True)
         return {"matched": bool(matches), "matches": matches[:10]}
-
-    @staticmethod
-    def _safe_int(value: object, default: int = 0) -> int:
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return default
 
     def _score_signature(self, incoming: dict[str, Any], known: dict[str, Any]) -> float:
         weight = 0.0

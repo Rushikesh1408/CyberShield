@@ -1,22 +1,56 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import ActivityChart from '../components/ActivityChart';
+import AttackStoryPanel from '../components/AttackStoryPanel';
+import AttackInsightsPanel from '../components/AttackInsightsPanel';
 import AlertsPanel from '../components/AlertsPanel';
 import BackupRecoveryPanel from '../components/BackupRecoveryPanel';
 import EmergencyPanel from '../components/EmergencyPanel';
 import FingerprintPanel from '../components/FingerprintPanel';
 import LogsTimeline from '../components/LogsTimeline';
+import ProofPanel from '../components/ProofPanel';
 import StatusCard from '../components/StatusCard';
+import SystemTimelinePanel from '../components/SystemTimelinePanel';
+import InterventionPanel from '../components/InterventionPanel';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 // API key is required — never falls back to a hardcoded value in production
 const API_KEY = import.meta.env.VITE_API_KEY ?? '';
 
+function joinApiUrl(path) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const normalizedBase = String(API_BASE || '').replace(/\/$/, '');
+
+  if (!normalizedBase) {
+    return normalizedPath;
+  }
+
+  if (normalizedBase.endsWith('/api') && normalizedPath.startsWith('/api/')) {
+    return `${normalizedBase}${normalizedPath.slice(4)}`;
+  }
+
+  return `${normalizedBase}${normalizedPath}`;
+}
+
 const initialSnapshot = {
   status: 'SAFE',
+  confidence: 0,
   is_monitoring: false,
   monitor_paths: [],
   monitoring_message: 'Monitoring: Protected System Directories (Auto-configured)',
+  core_pipeline: {
+    is_running: false,
+    network_mode: 'safe',
+    threat: {
+      score: 0,
+      level: 'LOW',
+      trigger_threshold: 70,
+      metrics: {
+        tracked_files: 0,
+        dna_mismatch_count: 0,
+      },
+    },
+  },
   metrics: {
     files_per_second: 0,
     modifications: 0,
@@ -29,6 +63,19 @@ const initialSnapshot = {
   alerts: [],
   logs: [],
   fingerprints: [],
+};
+
+const initialAttackStory = {
+  attackSourcePath: '',
+  processDisplay: '',
+  filesAffected: 0,
+  actionTaken: '',
+  finalStatus: 'SAFE',
+  timeline: {
+    detected: false,
+    terminated: false,
+    restored: false,
+  },
 };
 
 function timeLabel(timestamp) {
@@ -67,7 +114,7 @@ async function fetchJson(path, options = {}, timeoutMs = 8000) {
     headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(joinApiUrl(path), {
     headers,
     ...options,
     signal: controller.signal,
@@ -103,6 +150,7 @@ export default function DashboardPage() {
   const [clearingLogs, setClearingLogs] = useState(false);
   const [isRunningBackup, setIsRunningBackup] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
+  const [isRunningIntervention, setIsRunningIntervention] = useState(false);
   const [backupStatus, setBackupStatus] = useState({
     status: 'Inactive',
     files_secured: 0,
@@ -115,8 +163,60 @@ export default function DashboardPage() {
   const [emergencyContact, setEmergencyContact] = useState('');
   const [isSavingContact, setIsSavingContact] = useState(false);
   const [isDownloadingReport, setIsDownloadingReport] = useState(false);
+  const [isSimulating, setIsSimulating] = useState(false);
   const [emergencyMessage, setEmergencyMessage] = useState('');
+  const [interventionMessage, setInterventionMessage] = useState('');
+  const [interventionResult, setInterventionResult] = useState(null);
+  const [attackSummary, setAttackSummary] = useState({
+    files_protected: 0,
+    files_encrypted: 0,
+    files_recovered: 0,
+    threat_confidence: 0,
+    honeytrap_triggers: 0,
+  });
+  const [fileStats, setFileStats] = useState({
+    files_protected: 0,
+    files_recovered: 0,
+  });
+  const [timeline, setTimeline] = useState([]);
+  const [attackStory, setAttackStory] = useState(initialAttackStory);
   const [error, setError] = useState('');
+
+  const loadSystemIntelligence = async () => {
+    try {
+      const [summaryResult, statsResult, timelineResult] = await Promise.allSettled([
+        fetchJson('/api/attack/summary', {}, 6000),
+        fetchJson('/api/file-stats', {}, 6000),
+        fetchJson('/api/timeline', {}, 6000),
+      ]);
+
+      if (summaryResult.status === 'fulfilled') {
+        const summaryData = summaryResult.value;
+        setAttackSummary({
+          files_protected: Number(summaryData.files_protected ?? 0),
+          files_encrypted: Number(summaryData.files_encrypted ?? 0),
+          files_recovered: Number(summaryData.files_recovered ?? 0),
+          threat_confidence: Number(summaryData.threat_confidence ?? 0),
+          honeytrap_triggers: Number(summaryData.honeytrap_triggers ?? 0),
+        });
+      }
+
+      if (statsResult.status === 'fulfilled') {
+        const statsData = statsResult.value;
+        setFileStats({
+          files_protected: Number(statsData.files_protected ?? 0),
+          files_recovered: Number(statsData.files_recovered ?? 0),
+        });
+      }
+
+      if (timelineResult.status === 'fulfilled') {
+        const timelineData = timelineResult.value;
+        setTimeline(Array.isArray(timelineData.timeline) ? timelineData.timeline : []);
+      }
+    } catch {
+      // Keep the last successful intelligence snapshot if polling is interrupted.
+    }
+  };
 
   const loadEmergencyContact = async () => {
     try {
@@ -144,57 +244,91 @@ export default function DashboardPage() {
   };
 
   const loadSnapshot = async () => {
-    try {
-      const [statusData, alertsData, logsData, fingerprintsData, metricsData] =
-        await Promise.all([
-          fetchJson('/api/status'),
-          fetchJson('/api/alerts'),
-          fetchJson('/api/logs'),
-          fetchJson('/api/fingerprints'),
-          fetchJson('/api/metrics'),
-        ]);
+    const [statusResult, alertsResult, logsResult, fingerprintsResult, metricsResult] =
+      await Promise.allSettled([
+        fetchJson('/api/status'),
+        fetchJson('/api/alerts'),
+        fetchJson('/api/logs'),
+        fetchJson('/api/fingerprints'),
+        fetchJson('/api/metrics'),
+      ]);
 
-      setSnapshot({
-        status: statusData.status ?? 'SAFE',
-        is_monitoring: Boolean(statusData.is_monitoring),
-        monitor_paths: statusData.monitor_paths ?? [],
-        monitoring_message:
+    setSnapshot((current) => {
+      const nextSnapshot = { ...current };
+
+      if (statusResult.status === 'fulfilled') {
+        const statusData = statusResult.value;
+        nextSnapshot.status = statusData.status;
+        nextSnapshot.confidence = Number(statusData.confidence ?? 0);
+        nextSnapshot.is_monitoring = Boolean(statusData.is_monitoring);
+        nextSnapshot.monitor_paths = statusData.monitor_paths ?? [];
+        nextSnapshot.monitoring_message =
           statusData.monitoring_message ??
-          'Monitoring: Protected System Directories (Auto-configured)',
-        metrics: metricsData.metrics ?? initialSnapshot.metrics,
-        alerts: alertsData.alerts ?? [],
-        logs: logsData.logs ?? [],
-        fingerprints: fingerprintsData.fingerprints ?? [],
-      });
+          'Monitoring: Protected System Directories (Auto-configured)';
+        nextSnapshot.core_pipeline = statusData.core_pipeline ?? initialSnapshot.core_pipeline;
+      }
 
-      const graphHistory = (metricsData.history ?? []).map((entry) => ({
-        label: timeLabel(entry.timestamp),
-        files_per_second: Number(entry.files_per_second ?? 0),
-      }));
-      setHistory(graphHistory);
-      setError('');
-    } catch (requestError) {
-      if (requestError.name === 'AbortError') {
+      if (alertsResult.status === 'fulfilled') {
+        nextSnapshot.alerts = alertsResult.value.alerts ?? [];
+      }
+
+      if (logsResult.status === 'fulfilled') {
+        nextSnapshot.logs = logsResult.value.logs ?? [];
+      }
+
+      if (fingerprintsResult.status === 'fulfilled') {
+        nextSnapshot.fingerprints = fingerprintsResult.value.fingerprints ?? [];
+      }
+
+      if (metricsResult.status === 'fulfilled') {
+        nextSnapshot.metrics = metricsResult.value.metrics ?? initialSnapshot.metrics;
+        const graphHistory = (metricsResult.value.history ?? []).map((entry) => ({
+          // Keep chart responsive to both short bursts and sustained file churn.
+          activity_signal: Math.max(
+            Number(entry.files_per_second ?? 0),
+            Number(entry.modifications ?? 0),
+          ),
+          label: timeLabel(entry.timestamp),
+          files_per_second: Number(entry.files_per_second ?? 0),
+        }));
+        setHistory(graphHistory);
+      }
+
+      return nextSnapshot;
+    });
+
+    const requestErrors = [statusResult, alertsResult, logsResult, fingerprintsResult, metricsResult].filter(
+      (result) => result.status === 'rejected',
+    );
+
+    if (requestErrors.length === 5) {
+      const firstError = requestErrors[0].reason;
+      if (firstError?.name === 'AbortError') {
         setError('Request timeout. Reconnecting to backend...');
       } else {
-        setError(requestError.message);
+        setError(firstError?.message ?? 'Failed to refresh dashboard data.');
       }
-    } finally {
-      setLoading(false);
+    } else {
+      setError('');
     }
+
+    setLoading(false);
   };
 
   useEffect(() => {
     loadSnapshot();
     loadBackupStatus();
     loadEmergencyContact();
+    loadSystemIntelligence();
 
     const snapshotInterval = window.setInterval(loadSnapshot, 2000);
     const backupInterval = window.setInterval(loadBackupStatus, 10000);
+    const intelligenceInterval = window.setInterval(loadSystemIntelligence, 4000);
 
     return () => {
       window.clearInterval(snapshotInterval);
       window.clearInterval(backupInterval);
+      window.clearInterval(intelligenceInterval);
     };
   }, []);
 
@@ -208,7 +342,142 @@ export default function DashboardPage() {
     toNumericValue(snapshot.metrics.cpu_percent_raw),
     toNumericValue(snapshot.metrics.cpu_percent_sampled),
   );
-  const chartData = useMemo(() => history.slice(-20), [history]);
+  const threatConfidence = Math.max(
+    toNumericValue(snapshot.confidence),
+    toNumericValue(snapshot.metrics.threat_confidence),
+    toNumericValue(attackSummary.threat_confidence),
+  );
+  const pipelineState = snapshot.core_pipeline ?? initialSnapshot.core_pipeline;
+  const pipelineThreat = pipelineState.threat ?? initialSnapshot.core_pipeline.threat;
+  const pipelineThreatLevel = String(pipelineThreat.level ?? 'LOW').toUpperCase();
+  const pipelineThreatScore = toNumericValue(pipelineThreat.score);
+  const pipelineMode = String(pipelineState.network_mode ?? 'safe').toUpperCase();
+  const trackedFiles = toNumericValue(pipelineThreat.metrics?.tracked_files);
+  const dnaMismatchCount = toNumericValue(pipelineThreat.metrics?.dna_mismatch_count);
+  const pipelineAccent =
+    pipelineThreatLevel === 'HIGH'
+      ? 'rose'
+      : pipelineThreatLevel === 'MEDIUM'
+        ? 'amber'
+        : 'green';
+  const chartData = useMemo(
+    () => history.slice(-120).map((entry) => ({
+      ...entry,
+      files_per_second: Number(entry.activity_signal ?? entry.files_per_second ?? 0),
+    })),
+    [history],
+  );
+
+  useEffect(() => {
+    const logs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
+    const attackEvents = new Set([
+      'attack_detected',
+      'process_killed',
+      'process_suspended',
+      'active_threat_neutralization',
+      'automatic_system_recovery',
+      'files_restored',
+      'file_restored',
+      'attack_report_generated',
+    ]);
+
+    const latestAttackLog = logs.find((item) => {
+      const event = String(item?.event || '').toLowerCase();
+      const eventType = String(item?.event_type || item?.level || '').toLowerCase();
+      return attackEvents.has(event) || eventType === 'critical';
+    });
+
+    const metadata = latestAttackLog?.metadata && typeof latestAttackLog.metadata === 'object'
+      ? latestAttackLog.metadata
+      : {};
+
+    const monitoredPaths = Array.isArray(metadata.paths) ? metadata.paths : [];
+    const sourcePath = String(
+      latestAttackLog?.file_path || metadata.file_path || monitoredPaths[0] || metadata.destination_path || '',
+    );
+
+    const processName = String(
+      latestAttackLog?.process_name || metadata.process_name || metadata.top_process || '',
+    ).trim();
+    const processPid = Number(metadata.pid ?? metadata.process_pid ?? 0);
+    const processDisplay = processName
+      ? processPid > 0
+        ? `${processName} (PID ${processPid})`
+        : processName
+      : processPid > 0
+        ? `PID ${processPid}`
+        : '';
+
+    const affectedFromLogs = Number(
+      metadata.files_affected ?? metadata.modifications ?? metadata.file_activity_count ?? 0,
+    );
+    const filesAffected = Math.max(
+      Number(attackSummary.files_encrypted ?? 0),
+      affectedFromLogs,
+    );
+
+    const timelineStates = new Set(
+      (Array.isArray(timeline) ? timeline : []).map((item) => String(item?.state || '').toUpperCase()),
+    );
+    const detected = timelineStates.has('ATTACK_DETECTED') || Boolean(latestAttackLog);
+    const terminated =
+      timelineStates.has('PROCESS_TERMINATED') ||
+      timelineStates.has('PROCESS_SUSPENDED') ||
+      ['process_killed', 'process_suspended', 'active_threat_neutralization'].includes(
+        String(latestAttackLog?.event || '').toLowerCase(),
+      );
+    const restored =
+      timelineStates.has('FILES_RESTORED') ||
+      ['automatic_system_recovery', 'files_restored', 'file_restored'].includes(
+        String(latestAttackLog?.event || '').toLowerCase(),
+      ) ||
+      Number(attackSummary.files_recovered || 0) > 0;
+
+    const actionParts = [];
+    if (terminated) {
+      actionParts.push('Process terminated');
+    }
+    if (restored) {
+      actionParts.push('files restored');
+    }
+    if (!terminated && !restored && detected) {
+      actionParts.push('Threat detected and queued');
+    }
+
+    const nextStory = {
+      attackSourcePath: sourcePath,
+      processDisplay,
+      filesAffected,
+      actionTaken: actionParts.join(' + '),
+      finalStatus: String(snapshot.status || 'SAFE').toUpperCase(),
+      timeline: {
+        detected,
+        terminated,
+        restored,
+      },
+    };
+
+    const hasSignal = Boolean(sourcePath || processDisplay || filesAffected > 0 || detected);
+
+    setAttackStory((current) => {
+      if (hasSignal) {
+        return nextStory;
+      }
+      if (current.attackSourcePath || current.processDisplay || current.filesAffected > 0) {
+        return {
+          ...current,
+          finalStatus: nextStory.finalStatus,
+          timeline: nextStory.timeline.detected || nextStory.timeline.terminated || nextStory.timeline.restored
+            ? nextStory.timeline
+            : current.timeline,
+        };
+      }
+      return {
+        ...current,
+        finalStatus: nextStory.finalStatus,
+      };
+    });
+  }, [attackSummary.files_encrypted, attackSummary.files_recovered, snapshot.logs, snapshot.status, timeline]);
 
   const handleStart = async () => {
     setBusy(true);
@@ -234,6 +503,82 @@ export default function DashboardPage() {
     }
   };
 
+  const handleRunAttackSimulation = async () => {
+    setIsSimulating(true);
+    try {
+      const response = await fetchJson(
+        '/api/simulate/attack',
+        {
+          method: 'POST',
+          body: JSON.stringify({ level: 'high', wait_timeout: 30 }),
+        },
+        45000,
+      );
+
+      const summary = response.attack_summary ?? {};
+      const encrypted = Number(summary.files_encrypted ?? 0);
+      const recovered = Number(summary.files_recovered ?? 0);
+      const reportReady = Boolean(response.report_ready);
+
+      setEmergencyMessage(
+        reportReady
+          ? `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report generated.`
+          : `Simulation completed. Encrypted: ${encrypted}, Recovered: ${recovered}. Report still pending.`,
+      );
+      setError('');
+      await loadSnapshot();
+      await loadBackupStatus();
+      await loadSystemIntelligence();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsSimulating(false);
+    }
+  };
+
+  const handleSafeIntervention = async () => {
+    setIsRunningIntervention(true);
+    try {
+      const response = await fetchJson(
+        '/api/intervention/handle',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            lookback_seconds: 5,
+            cpu_threshold: 65,
+            terminate_threshold: 60,
+            recheck_delay_seconds: 1.5,
+          }),
+        },
+        45000,
+      );
+
+      setInterventionResult({
+        status: String(response.status ?? 'SAFE'),
+        action_taken: Array.isArray(response.action_taken) ? response.action_taken : [],
+        files_protected: Number(response.files_protected ?? 0),
+        files_recovered: Number(response.files_recovered ?? 0),
+        suspicious_processes: Array.isArray(response.suspicious_processes) ? response.suspicious_processes : [],
+        confirmed_processes: Array.isArray(response.confirmed_processes) ? response.confirmed_processes : [],
+      });
+
+      const actionSummary = Array.isArray(response.action_taken) && response.action_taken.length > 0
+        ? response.action_taken.join(', ')
+        : 'no_actions_needed';
+      setInterventionMessage(
+        `Safe intervention completed with ${actionSummary}. Protected ${Number(response.files_protected ?? 0)} files and recovered ${Number(response.files_recovered ?? 0)} files.`,
+      );
+      setError('');
+      await loadSnapshot();
+      await loadBackupStatus();
+      await loadSystemIntelligence();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsRunningIntervention(false);
+    }
+  };
+
   const handleClearLogs = async () => {
     setClearingLogs(true);
     try {
@@ -254,6 +599,7 @@ export default function DashboardPage() {
       setBackupMessage(`Backup completed. Created: ${response.created ?? 0} snapshot(s).`);
       await loadSnapshot();
       await loadBackupStatus();
+      await loadSystemIntelligence();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -268,9 +614,10 @@ export default function DashboardPage() {
         method: 'POST',
         body: JSON.stringify({ file_path: filePath }),
       });
-      setBackupMessage(`Recovered file: ${filePath}`);
+      setBackupMessage(`Automatic System Recovery restored: ${filePath}`);
       await loadSnapshot();
       await loadBackupStatus();
+      await loadSystemIntelligence();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -279,9 +626,9 @@ export default function DashboardPage() {
   };
 
   const handleSaveEmergencyContact = async () => {
-    const phone = emergencyContact.trim();
-    if (!phone) {
-      setEmergencyMessage('Please enter a phone number before saving.');
+    const email = emergencyContact.trim();
+    if (!email) {
+      setEmergencyMessage('Please enter an email address before saving.');
       return;
     }
 
@@ -289,10 +636,10 @@ export default function DashboardPage() {
     try {
       const response = await fetchJson('/api/emergency/contact', {
         method: 'POST',
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({ email }),
       });
-      setEmergencyContact(String(response.contact ?? phone));
-      setEmergencyMessage('Emergency contact saved successfully.');
+      setEmergencyContact(String(response.contact ?? email));
+      setEmergencyMessage('Emergency email contact saved successfully.');
       setError('');
     } catch (requestError) {
       setError(requestError.message);
@@ -306,8 +653,7 @@ export default function DashboardPage() {
     try {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 8000);
-      // Include API key on this raw fetch too
-      const response = await fetch(`${API_BASE}/api/report/download`, {
+      const response = await fetch(joinApiUrl('/api/report/download'), {
         method: 'GET',
         signal: controller.signal,
         headers: { 'x-api-key': API_KEY },
@@ -334,7 +680,7 @@ export default function DashboardPage() {
       anchor.click();
       anchor.remove();
       window.URL.revokeObjectURL(downloadUrl);
-      setEmergencyMessage('Attack report downloaded.');
+      setEmergencyMessage('CyberShield attack report downloaded.');
       setError('');
     } catch (requestError) {
       const rawMessage = String(requestError.message ?? 'Failed to download report.');
@@ -354,15 +700,15 @@ export default function DashboardPage() {
           <div className="grid gap-6 px-6 py-6 lg:grid-cols-[1.4fr_0.8fr] lg:px-8 lg:py-8">
             <div>
               <div className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/80 px-4 py-1 text-xs uppercase tracking-[0.32em] text-sky-300">
-                CyberShield AI
+                CyberShield
               </div>
               <h1 className="mt-5 max-w-3xl text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-                Real-Time Ransomware Defense System Live
+                Real-Time Ransomware Defense System
               </h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-300">
-                Automatically monitor protected system directories, detect ransomware-like
-                bursts, kill suspicious processes, restore files from versioned backups, and
-                store reusable attack fingerprints.
+                Early Threat Detection, Active Threat Neutralization, Versioned Snapshot System,
+                and Automatic System Recovery in one lightweight local defense stack. Threshold-based
+                early warning using behavioral anomalies such as CPU spikes and high file access rate.
               </p>
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <span
@@ -382,7 +728,7 @@ export default function DashboardPage() {
                 ) : null}
               </div>
 
-              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <StatusCard
                   title="File Rate"
                   value={`${(snapshot.metrics.files_per_second ?? 0).toFixed(1)} /s`}
@@ -402,20 +748,27 @@ export default function DashboardPage() {
                   accent="amber"
                 />
                 <StatusCard
-                  title="Alerts"
-                  value={snapshot.alerts.length}
-                  caption="Stored timeline entries"
-                  accent={isUnderAttack ? 'rose' : 'blue'}
+                  title="Threat Confidence"
+                  value={`${Math.round(threatConfidence)}%`}
+                  caption="Behavioral certainty score"
+                  accent={isUnderAttack ? 'rose' : 'amber'}
+                />
+                <StatusCard
+                  title="Pipeline Level"
+                  value={pipelineThreatLevel}
+                  caption={`Score ${Math.round(pipelineThreatScore)}% • ${pipelineMode}`}
+                  accent={pipelineAccent}
                 />
               </div>
             </div>
 
             <div className="rounded-[1.75rem] border border-slate-800 bg-slate-900/70 p-5">
-              <div className="text-sm uppercase tracking-[0.26em] text-slate-400">Demo Controls</div>
+              <div className="text-sm uppercase tracking-[0.26em] text-slate-400">Protection Controls</div>
               <div className="mt-3 text-2xl font-semibold text-white">Auto protection loop</div>
               <p className="mt-2 text-sm leading-6 text-slate-300">
                 The engine automatically protects configured system directories. Launch a
-                ransomware simulation to see early detection, process kill, and recovery.
+                simulation to observe Early Threat Detection, Active Threat Neutralization,
+                and Automatic System Recovery.
               </p>
               <div className="mt-5 rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm text-slate-300">
                 {snapshot.monitoring_message}
@@ -424,7 +777,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   id="btn-start-monitoring"
-                  disabled={busy}
+                  disabled={busy || isSimulating}
                   onClick={handleStart}
                   className="rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
                 >
@@ -433,13 +786,29 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   id="btn-stop-monitoring"
-                  disabled={busy}
+                  disabled={busy || isSimulating}
                   onClick={handleStop}
                   className="rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   Stop Monitoring
                 </button>
               </div>
+              <button
+                type="button"
+                disabled={busy || isSimulating}
+                onClick={handleRunAttackSimulation}
+                className="mt-3 w-full rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/70 disabled:text-slate-500"
+              >
+                {isSimulating ? 'Running Simulation...' : 'Run Attack Simulation'}
+              </button>
+              <button
+                type="button"
+                disabled={busy || isSimulating || isRunningIntervention}
+                onClick={handleSafeIntervention}
+                className="mt-3 w-full rounded-2xl border border-sky-400/40 bg-sky-500/10 px-4 py-3 text-sm font-semibold text-sky-200 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900/70 disabled:text-slate-500"
+              >
+                {isRunningIntervention ? 'Running Safe Intervention...' : 'Run Safe Intervention'}
+              </button>
               <div className="mt-4 rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-sm text-slate-300">
                 <div className="flex items-center justify-between gap-3">
                   <span>Status</span>
@@ -455,6 +824,16 @@ export default function DashboardPage() {
                       : 'Protected folder fallback'}
                   </span>
                 </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span>Tracked Files</span>
+                  <span className="text-slate-300">{trackedFiles}</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <span>DNA Mismatch Count</span>
+                  <span className={dnaMismatchCount > 0 ? 'text-amber-300' : 'text-slate-400'}>
+                    {dnaMismatchCount}
+                  </span>
+                </div>
                 <div className="mt-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs text-slate-400">
                   {snapshot.monitor_paths.length > 0
                     ? snapshot.monitor_paths.join(' | ')
@@ -466,13 +845,40 @@ export default function DashboardPage() {
                   {error}
                 </div>
               ) : null}
+              {interventionMessage ? (
+                <div className="mt-4 rounded-2xl border border-sky-400/30 bg-sky-500/10 p-4 text-sm text-sky-100">
+                  {interventionMessage}
+                </div>
+              ) : null}
             </div>
           </div>
         </section>
 
+        <ProofPanel
+          filesProtected={Math.max(Number(fileStats.files_protected ?? 0), Number(attackSummary.files_protected ?? 0))}
+          filesEncrypted={Number(attackSummary.files_encrypted ?? 0)}
+          filesRecovered={Math.max(Number(fileStats.files_recovered ?? 0), Number(attackSummary.files_recovered ?? 0))}
+          threatConfidence={threatConfidence}
+        />
+
         <section className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
           <ActivityChart data={chartData} />
           <AlertsPanel alerts={snapshot.alerts} />
+        </section>
+
+        <AttackStoryPanel story={attackStory} />
+
+        <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+          <AttackInsightsPanel
+            confidence={threatConfidence}
+            attackSummary={attackSummary}
+            fileStats={fileStats}
+          />
+          <SystemTimelinePanel
+            timeline={timeline}
+            onClearTimeline={handleClearLogs}
+            isClearingTimeline={clearingLogs}
+          />
         </section>
 
         <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
@@ -491,6 +897,13 @@ export default function DashboardPage() {
           isRunningBackup={isRunningBackup}
           isRecovering={isRecovering}
           message={backupMessage}
+        />
+
+        <InterventionPanel
+          result={interventionResult}
+          onRunIntervention={handleSafeIntervention}
+          isRunningIntervention={isRunningIntervention}
+          message={interventionMessage}
         />
 
         <EmergencyPanel

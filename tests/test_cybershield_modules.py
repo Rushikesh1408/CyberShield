@@ -15,17 +15,6 @@ from backend.modules import (
 )
 
 
-class _FakeConnection:
-    def __init__(self, *, pid: int = 4321) -> None:
-        self.pid = pid
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-
 class _FakeProcess:
     def __init__(self, pid: int, ppid: int, name: str, path: str, cmdline: str, created_at: float = 1_700_000_000.0) -> None:
         self.pid = pid
@@ -67,16 +56,16 @@ class _FakeProcessService:
         return self.processes.get(pid)
 
     def safe_name(self, process) -> str:
-        return process._name
+        return getattr(process, "_name", "") or (process.name() if hasattr(process, "name") else "")
 
     def safe_exe(self, process) -> str:
-        return process._path
+        return getattr(process, "_path", "")
 
     def safe_cmdline(self, process) -> str:
-        return process._cmdline
+        return getattr(process, "_cmdline", "") or (" ".join(process.cmdline()) if hasattr(process, "cmdline") else "")
 
     def safe_parent_pid(self, process) -> int:
-        return process.ppid()
+        return int(getattr(process, "_ppid", 0) or (process.ppid() if hasattr(process, "ppid") else 0))
 
     def detect_suspicious_processes(self, **kwargs):
         return [
@@ -91,8 +80,7 @@ class _FakeProcessService:
 
 
 def test_attack_signature_and_correlation_round_trip():
-    engine = AttackSignatureEngine()
-    signature = engine.generate(
+    signature = AttackSignatureEngine().generate(
         entropy=7.61,
         file_rate=44.2,
         process_name="ransom.exe",
@@ -112,13 +100,11 @@ def test_attack_signature_and_correlation_round_trip():
 
 
 def test_wallet_tracker_extracts_btc_and_eth():
-    tracker = WalletTracker()
-    wallets = tracker.extract_wallets_from_text(
+    wallets = WalletTracker().extract_wallets_from_text(
         "pay to bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh or 0x0123456789abcdef0123456789abcdef01234567"
     )
 
-    wallet_types = {wallet["type"] for wallet in wallets}
-    assert wallet_types == {"btc", "eth"}
+    assert {wallet["type"] for wallet in wallets} == {"btc", "eth"}
 
 
 def test_process_tree_network_and_timeline_modules(tmp_path):

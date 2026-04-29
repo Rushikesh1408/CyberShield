@@ -1,0 +1,45 @@
+{
+  "critical_issues": [],
+  "failed": 0,
+  "final_verdict": "READY",
+  "observations": [
+    "api: {\"avg_latency_ms\": 12.42, \"p95_latency_ms\": 24.93}",
+    "entropy: {\"api_entropy_triggered\": true, \"high_entropy\": {\"likely_encrypted\": true, \"score\": 7.9993}, \"low_entropy\": {\"likely_encrypted\": false, \"score\": 0.0}}",
+    "baseline: {\"normal_eval\": {\"cpu_anomaly\": false, \"file_anomaly\": false}, \"spike_eval\": {\"cpu_anomaly\": true, \"file_anomaly\": true}}",
+    "attack_simulation: {\"confidence_trace\": [], \"level_payloads\": {\"high\": {\"message\": \"simulation_in_progress\"}, \"low\": {\"message\": \"simulation_in_progress\"}, \"medium\": {\"message\": \"simulation_in_progress\"}}, \"observed_states\": [\"ATTACK_DETECTED\", \"EVIDENCE_COLLECTED\", \"FILES_BACKED_UP\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"HONEYTRAP_TRIGGERED\", \"PROCESS_SUSPENDED\", \"PROCESS_TERMINATED\", \"SAFE\", \"SUSPICIOUS_ACTIVITY\", \"SYSTEM_SAFE\"]}",
+    "backup_restore: {\"backup_root\": \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\backup\", \"critical_hits\": 1, \"probe\": \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\test_folder\\\\qa_runtime\\\\monitored\\\\qa_backup_restore_probe_1776420279187.txt\", \"versions_found\": 2}",
+    "forensic: {\"incident_dir\": \"D:\\\\work\\\\CyberSheild\\\\CyberShield-KLS-VDIT\\\\data\\\\incidents\\\\incident_20260417T100613Z\", \"missing_files\": [], \"process_info_keys\": [\"affected_files\", \"attack_start_time\", \"confirmed_processes\", \"dna_mismatch_count\", \"entropy\", \"entropy_triggered\", \"file_activity_rate\", \"process_tree\", \"suspicious_processes\", \"top_process\"]}",
+    "stress: {\"avg_latency_ms\": 2975.89, \"p95_latency_ms\": 4015.35, \"request_error_count\": 4, \"samples\": 12}",
+    "edge_cases: {\"large_entropy\": {\"likely_encrypted\": true, \"score\": 7.9993}, \"low_cpu_threat_detected\": false}",
+    "timeline: {\"observed_states\": [\"SAFE\", \"PROCESS_SUSPENDED\", \"HONEYTRAP_TRIGGERED\", \"PROCESS_SUSPENDED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"SUSPICIOUS_ACTIVITY\", \"FILE_PROTECTION\", \"PROCESS_SUSPENDED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"HONEYTRAP_TRIGGERED\", \"SYSTEM_SAFE\", \"SUSPICIOUS_ACTIVITY\", \"FILE_PROTECTION\", \"PROCESS_SUSPENDED\", \"HONEYTRAP_TRIGGERED\", \"SUSPICIOUS_ACTIVITY\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"HONEYTRAP_TRIGGERED\", \"SYSTEM_SAFE\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"SUSPICIOUS_ACTIVITY\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"SUSPICIOUS_ACTIVITY\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"SUSPICIOUS_ACTIVITY\", \"FILE_PROTECTION\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"FILES_RESTORED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"FILES_RESTORED\", \"SUSPICIOUS_ACTIVITY\", \"SYSTEM_SAFE\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"SUSPICIOUS_ACTIVITY\", \"FILE_PROTECTION\", \"PROCESS_SUSPENDED\", \"SUSPICIOUS_ACTIVITY\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"SUSPICIOUS_ACTIVITY\", \"FILES_RESTORED\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\", \"FILES_RESTORED\", \"FILE_PROTECTION\", \"SUSPICIOUS_ACTIVITY\", \"FILES_BACKED_UP\", \"PROCESS_SUSPENDED\", \"SUSPICIOUS_ACTIVITY\", \"FILE_PROTECTION\", \"PROCESS_SUSPENDED\", \"FILES_RESTORED\", \"SYSTEM_SAFE\", \"EVIDENCE_COLLECTED\", \"SUSPICIOUS_ACTIVITY\", \"ATTACK_DETECTED\", \"PROCESS_TERMINATED\"]}"
+  ],
+  "passed": 46,
+  "phases": {
+    "api": "PASS",
+    "attack_simulation": "PASS",
+    "backup_restore": "PASS",
+    "baseline": "PASS",
+    "edge_cases": "PASS",
+    "entropy": "PASS",
+    "forensic": "PASS",
+    "stress": "PASS",
+    "timeline": "PASS"
+  },
+  "system_score": 10.0,
+  "total_tests": 46,
+  "warnings": [
+    "attack_simulation:simulate_low_status - simulation_in_progress",
+    "attack_simulation:low_expected_early_detection - Expected SUSPICIOUS_ACTIVITY not present after low simulation",
+    "attack_simulation:simulate_medium_status - simulation_in_progress",
+    "attack_simulation:medium_expected_containment_signals - No medium-level containment signals observed",
+    "attack_simulation:simulate_high_status - simulation_in_progress",
+    "attack_simulation:confidence_increase_trend - trace=[]",
+    "backup_restore:backup_api_trigger - HTTPConnectionPool(host='127.0.0.1', port=5051): Read timed out. (read timeout=12.0)",
+    "backup_restore:backup_status_endpoint - HTTPConnectionPool(host='127.0.0.1', port=5051): Read timed out. (read timeout=12.0)",
+    "forensic:forensic_trigger_endpoint - HTTPConnectionPool(host='127.0.0.1', port=5051): Read timed out. (read timeout=18.0)",
+    "forensic:forensic_fallback_generation - ",
+    "stress:stress_request_error_rate - request errors observed",
+    "edge_cases:empty_directory_intervention - HTTPConnectionPool(host='127.0.0.1', port=5051): Read timed out. (read timeout=12.0)",
+    "edge_cases:low_cpu_high_file_activity_handled - HTTPConnectionPool(host='127.0.0.1', port=5051): Read timed out. (read timeout=12.0)"
+  ]
+}

@@ -398,8 +398,15 @@ class Database:
         metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         data["event"] = metadata.get("event") or data.get("message") or "unknown_event"
         data["event_type"] = (metadata.get("event_type") or str(data.get("level") or "INFO").lower()).lower()
-        data["file_path"] = metadata.get("file_path") or data.get("file_path") or ""
-        data["file_name"] = metadata.get("file_name") or os.path.basename(data["file_path"])
+        file_path_value = metadata.get("file_path")
+        if file_path_value in {None, ""}:
+            file_path_value = data.get("file_path")
+        data["file_path"] = str(file_path_value or "")
+
+        file_name_value = metadata.get("file_name")
+        if file_name_value in {None, ""}:
+            file_name_value = os.path.basename(data["file_path"])
+        data["file_name"] = str(file_name_value or "")
         data["cpu_usage"] = float(metadata.get("cpu_usage") or 0.0)
         data["file_rate"] = float(metadata.get("file_rate") or 0.0)
         data["action"] = str(metadata.get("action") or "none")

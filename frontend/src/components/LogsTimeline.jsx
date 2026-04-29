@@ -104,7 +104,7 @@ export default function LogsTimeline({ logs, onClearLogs, isClearingLogs = false
           {isClearingLogs ? 'Clearing...' : 'Clear Logs'}
         </button>
       </div>
-      <div className="mt-5 space-y-3">
+      <div className="mt-5 max-h-[34rem] space-y-3 overflow-y-auto pr-1">
         {logs.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/50 p-5 text-sm text-slate-400">
             No log entries available yet.

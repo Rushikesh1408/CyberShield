@@ -1,0 +1,31 @@
+[DEBUG] Starting main()
+[DEBUG] Recorder created
+[DEBUG] Runtime dirs ensured
+[DEBUG] About to boot backend
+[DEBUG] Backend booted: http://127.0.0.1:5051
+[DEBUG] Starting API call: /api/start
+[DEBUG] Completed API call: /api/start
+[DEBUG] Starting api_tests phase
+[DEBUG] Completed api_tests phase
+[DEBUG] Starting entropy_tests phase
+[DEBUG] Completed entropy_tests phase
+[DEBUG] Starting baseline_tests phase
+[DEBUG] Completed baseline_tests phase
+[DEBUG] Starting attack_simulation_tests phase
+[DEBUG] Completed attack_simulation_tests phase
+[DEBUG] Starting backup_restore_tests phase
+[DEBUG][backup_restore] Starting
+[DEBUG][backup_restore] probe=D:\work\CyberSheild\CyberShield-KLS-VDIT\test_folder\qa_runtime\monitored\qa_backup_restore_probe_1776418784032.txt
+[DEBUG][backup_restore] Computing original_hash
+[DEBUG][backup_restore] original_hash=8a2a977826101fe2364af40bcbeff91c138e3ad13f51d04d5110435147adca05
+[DEBUG][backup_restore] Creating BackupService
+[DEBUG][backup_restore] Creating RecoveryService
+[DEBUG][backup_restore] Services created
+[DEBUG][backup_restore] Calling backup_service.backup_active_files
+[DEBUG][backup_restore] backup_result={'files_protected': 1, 'backup_versions': 1, 'recent_files': ['D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\test_folder\\qa_runtime\\monitored\\qa_backup_restore_probe_1776418784032.txt'], 'results': [{'source_path': 'D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\test_folder\\qa_runtime\\monitored\\qa_backup_restore_probe_1776418784032.txt', 'backup_path': 'D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\backup\\monitored\\qa_backup_restore_probe_1776418784032_v1.txt', 'version': 1}], 'backup_root': 'D:\\work\\CyberSheild\\CyberShield-KLS-VDIT\\backup'}
+[DEBUG] Completed backup_restore_tests phase
+[DEBUG] Starting backup_protection_tests phase
+[DEBUG] Completed backup_protection_tests phase
+[DEBUG] Starting forensic_tests phase
+[DEBUG] Completed forensic_tests phase
+[DEBUG] Starting stress_tests phase

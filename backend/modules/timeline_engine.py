@@ -29,12 +29,11 @@ class TimelineEngine:
         }
 
         if self._entries and self._entries[-1]["state"] == entry["state"]:
-            # Merge: increment counter, merge details, preserve first timestamp, update last_seen
+            # HEAD: merge consecutive same-state entries for richer context
             prev = self._entries[-1]
             prev["occurrences"] = prev.get("occurrences", 1) + 1
-            prev["details"] = f"{prev.get('details','')} | {entry.get('details','')}"
+            prev["details"] = f"{prev.get('details', '')} | {entry.get('details', '')}"
             prev["last_seen"] = entry["timestamp"]
-            # Optionally update severity if new is higher
             if entry["severity"] != prev.get("severity"):
                 prev["severity"] = entry["severity"]
             prev["title"] = entry["title"]

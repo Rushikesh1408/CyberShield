@@ -1,0 +1,39 @@
+{
+  "system_score": 9.8,
+  "verdict": "READY",
+  "performance": {
+    "detection_latency_ms": 260.21,
+    "event_delay_ms": 162.75,
+    "api_latency_ms": 13.31
+  },
+  "stability": {
+    "crashes": 0,
+    "disconnects": 0,
+    "reconnections": 1,
+    "missed_events": 0
+  },
+  "recovery": {
+    "success": true,
+    "data_loss": 0
+  },
+  "realtime_sync": {
+    "web": "OK",
+    "mobile": "OK"
+  },
+  "health": {
+    "socket_active": true,
+    "clients": 1,
+    "status": "healthy"
+  },
+  "metrics": {
+    "detection_latency": 260.2052688598633,
+    "event_propagation_time": 162.74849573771158,
+    "api_latency": 13.311312499993733,
+    "missed_events": 0,
+    "crashes": 0,
+    "reconnections": 1
+  },
+  "timestamps": {
+    "generated_at": 1776593773.7187414
+  }
+}

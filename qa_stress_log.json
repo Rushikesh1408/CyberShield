@@ -1,0 +1,117 @@
+{
+  "logs": [
+    {
+      "timestamp": 1776593706.7954576,
+      "level": "INFO",
+      "message": "Backend already running",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593713.784937,
+      "level": "INFO",
+      "message": "Starting frontend process",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593723.1492941,
+      "level": "INFO",
+      "message": "Connecting Socket.IO probe client",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593723.1527007,
+      "level": "INFO",
+      "message": "Running Phase 1: system health check",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593723.1540694,
+      "level": "INFO",
+      "message": "Running Phase 2: baseline latency measurement",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593724.4647527,
+      "level": "INFO",
+      "message": "Running Phase 3: attack simulation",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593724.4658585,
+      "level": "INFO",
+      "message": "Running simulator level=setup",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593724.5596597,
+      "level": "INFO",
+      "message": "Running simulator level=high",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593754.9206262,
+      "level": "INFO",
+      "message": "Running Phase 4: realtime sync assertions",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593755.369721,
+      "level": "INFO",
+      "message": "Running Phase 5: stress load",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593763.3977637,
+      "level": "INFO",
+      "message": "Running Phase 6: recovery validation",
+      "data": {}
+    },
+    {
+      "timestamp": 1776593769.4594235,
+      "level": "INFO",
+      "message": "Running Phase 7: disconnect/reconnect test",
+      "data": {}
+    }
+  ],
+  "events": [
+    {
+      "received_at": 1776593755.1697009,
+      "event_type": "ATTACK_DETECTED",
+      "payload_timestamp": 1776593754.9267352,
+      "event_delay_ms": 242.9656982421875,
+      "data": {
+        "source": "qa_stress_runner",
+        "selftest": true,
+        "files_affected": 1,
+        "recovered": 0,
+        "confidence": 92
+      }
+    },
+    {
+      "received_at": 1776593755.1700501,
+      "event_type": "FILES_RESTORED",
+      "payload_timestamp": 1776593755.0073397,
+      "event_delay_ms": 162.71042823791504,
+      "data": {
+        "source": "qa_stress_runner",
+        "selftest": true,
+        "files_affected": 0,
+        "recovered": 1,
+        "confidence": 100
+      }
+    },
+    {
+      "received_at": 1776593755.1703033,
+      "event_type": "SYSTEM_SAFE",
+      "payload_timestamp": 1776593755.087734,
+      "event_delay_ms": 82.56936073303223,
+      "data": {
+        "source": "qa_stress_runner",
+        "selftest": true,
+        "files_affected": 0,
+        "recovered": 0,
+        "confidence": 100
+      }
+    }
+  ]
+}

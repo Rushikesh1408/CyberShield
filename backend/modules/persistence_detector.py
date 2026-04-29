@@ -49,6 +49,7 @@ class PersistenceDetector:
             try:
                 name = self.process_service.safe_name(process).lower()
                 executable = self.process_service.safe_exe(process).lower()
+                # Support both str and list return types from safe_cmdline
                 cmdline_val = self.process_service.safe_cmdline(process)
                 if isinstance(cmdline_val, list):
                     cmdline = " ".join(str(x) for x in cmdline_val).lower()

@@ -8,6 +8,8 @@ BTC_PATTERN = re.compile(r"\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}\b")
 ETH_PATTERN = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 RANSOM_NOTE_NAME_HINTS = ("readme", "decrypt", "recover", "ransom", "how_to")
 
+MAX_FILE_BYTES = 1024 * 1024  # 1MB
+
 
 class WalletTracker:
     def extract_wallets_from_text(self, text: str) -> list[dict[str, str]]:
@@ -28,7 +30,6 @@ class WalletTracker:
         findings: list[dict[str, str]] = []
         scanned = 0
 
-        MAX_FILE_BYTES = 1024 * 1024  # 1MB
         for root_value in roots:
             root = Path(root_value).resolve()
             if not root.exists() or not root.is_dir():
@@ -37,6 +38,8 @@ class WalletTracker:
             for file_path in root.rglob("*"):
                 if scanned >= max_files:
                     return findings
+
+                # HEAD: skip symlinks for security; branch only skips non-files
                 if not file_path.is_file() or file_path.is_symlink():
                     continue
 
@@ -46,12 +49,13 @@ class WalletTracker:
 
                 scanned += 1
                 try:
-                    # File size guard
+                    # HEAD: file size guard to prevent reading huge files
                     try:
                         if file_path.stat().st_size > MAX_FILE_BYTES:
                             continue
                     except OSError:
                         continue
+
                     content = file_path.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue

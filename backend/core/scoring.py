@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ThreatScore:
+    score: int
+    level: str
+
+
+def _clamp01(value: float) -> float:
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def _threat_level(score: int) -> str:
+    if score >= 70:
+        return "HIGH"
+    if score >= 40:
+        return "MEDIUM"
+    return "LOW"
+
+
+def calculate_threat_score(
+    *,
+    file_activity_count: int,
+    cpu_usage: float,
+    dna_mismatch_count: int,
+    entropy: float = 0.0,
+    entropy_threshold_hit: bool = False,
+    process_risk: float = 0.0,
+    idle_seconds: float = 0.0,
+    max_file_activity: int = 200,
+    max_dna_mismatch: int = 20,
+) -> dict[str, int | str]:
+    """Compute weighted ransomware threat score in the range 0-100."""
+    safe_max_file_activity = max(1, int(max_file_activity))
+    safe_max_dna_mismatch = max(1, int(max_dna_mismatch))
+    idle_seconds = max(0.0, float(idle_seconds))
+
+    file_activity_score = _clamp01(float(file_activity_count) / float(safe_max_file_activity))
+    cpu_score = _clamp01(float(cpu_usage) / 100.0)
+    dna_score = _clamp01(float(dna_mismatch_count) / float(safe_max_dna_mismatch))
+    entropy_score = _clamp01((float(entropy) - 5.0) / 3.0)
+    process_risk_score = _clamp01(float(process_risk))
+
+    weighted_score = (
+        0.45 * file_activity_score
+        + 0.15 * cpu_score
+        + 0.2 * dna_score
+        + 0.1 * entropy_score
+        + 0.1 * process_risk_score
+    )
+    if entropy_threshold_hit:
+        weighted_score += 0.05
+    idle_decay_factor = 1.0
+    if idle_seconds >= 240.0:
+        idle_decay_factor = 0.0
+    elif idle_seconds > 0.0:
+        idle_decay_factor = max(0.0, 1.0 - (idle_seconds / 240.0))
+    weighted_score *= idle_decay_factor
+
+    score = int(round(_clamp01(weighted_score) * 100.0))
+    level = _threat_level(score)
+
+    return ThreatScore(score=score, level=level).__dict__.copy()
