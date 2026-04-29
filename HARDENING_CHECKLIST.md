@@ -45,7 +45,7 @@
 - [x] Docker Compose for backend, frontend, db
 - [x] Healthcheck in Docker config
 - [x] .env.example and README.md present
-- [x] Secure default configs
+- [ ] Secure default configs (Update .env.example to use non-functional placeholders for POSTGRES_PASSWORD, JWT_SECRET, API_KEY, etc. before checking this box)
 
 ---
 

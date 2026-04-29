@@ -17,8 +17,12 @@ class ProcessManager:
             name = proc.name().lower()
             if name in (n.lower() for n in SYSTEM_NAMES):
                 return True
-            if proc.username() in ('root', 'SYSTEM'):
-                return True
+            username = proc.username()
+            if username is not None:
+                uname = username.upper()
+                # Unix root or Windows SYSTEM (domain-qualified)
+                if uname == 'ROOT' or uname == 'SYSTEM' or uname.endswith('\\SYSTEM'):
+                    return True
             return False
         except Exception:
             return True  # If in doubt, do not kill
