@@ -1,8 +1,11 @@
 # Production-grade database connection for CyberShield
 import os
+import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger("cybershield.database")
 
 # Load .env from both backend/ and project root so all configs are available
 _backend_env = Path(__file__).resolve().parent.parent / ".env"
@@ -15,10 +18,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 # Individual Postgres vars (only used when DATABASE_URL is not set)
+# No defaults for credentials — they must be supplied explicitly.
 POSTGRES_DB = os.environ.get("POSTGRES_DB", "cybershield")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "cyber")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "shield")
-# Default to localhost for local dev; use "db" inside Docker via DATABASE_URL
+POSTGRES_USER = os.environ.get("POSTGRES_USER")
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD")
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
 
@@ -30,10 +33,30 @@ def get_database_url() -> str:
     url = os.environ.get("DATABASE_URL", "")
     if url:
         return url
+
     # Offline / local-only mode
     if os.environ.get("OFFLINE_MODE") == "1":
         return f"sqlite:///{SQLITE_PATH}"
-    # Default: SQLite so the app always starts without Postgres
+
+    # When Postgres credentials are available, build the Postgres URL
+    if POSTGRES_USER and POSTGRES_PASSWORD:
+        return (
+            f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
+            f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+        )
+
+    # If credentials are absent, raise in Postgres mode to fail fast
+    if os.environ.get("REQUIRE_POSTGRES", "0") == "1":
+        raise ValueError(
+            "POSTGRES_USER and POSTGRES_PASSWORD must be set when REQUIRE_POSTGRES=1. "
+            "Set DATABASE_URL or OFFLINE_MODE=1 to use SQLite."
+        )
+
+    # Default: SQLite so the app always starts in local dev without Postgres
+    logger.warning(
+        "POSTGRES_USER/POSTGRES_PASSWORD not set — falling back to SQLite. "
+        "Set REQUIRE_POSTGRES=1 to fail fast in production."
+    )
     return f"sqlite:///{SQLITE_PATH}"
 
 

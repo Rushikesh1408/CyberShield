@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from pathlib import Path
 from typing import Any, Mapping
@@ -44,7 +45,10 @@ def generate_dna_signature(event_data):
     Generate a structured DNA signature from event data.
     """
     sig = {
-        "id": hashlib.sha256(str(event_data).encode()).hexdigest(),
+        "id": hashlib.sha256(
+            json.dumps(event_data, sort_keys=True, separators=(',', ':'),
+                       ensure_ascii=False, default=str).encode('utf-8')
+        ).hexdigest(),
         "actions": event_data.get("actions", []),
         "extensions": event_data.get("extensions", []),
         "speed": event_data.get("speed", "unknown"),
@@ -76,8 +80,15 @@ def dna_similarity(sig1, sig2):
         score += 30 * seq_score
     if sig1.get("speed") == sig2.get("speed"):
         score += 10
-    if abs(sig1.get("impact_score", 0) - sig2.get("impact_score", 0)) <= 10:
-        score += 10
+    s1_impact = sig1.get("impact_score", 0)
+    s2_impact = sig2.get("impact_score", 0)
+    s1_impact = 0 if s1_impact is None else s1_impact
+    s2_impact = 0 if s2_impact is None else s2_impact
+    try:
+        if abs(float(s1_impact) - float(s2_impact)) <= 10:
+            score += 10
+    except (TypeError, ValueError):
+        pass
     return round(score)
 
 

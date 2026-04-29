@@ -226,10 +226,14 @@ class CyberShieldPipeline:
         return assessment
 
     def process(self, event: dict) -> dict:
-        """Process a single file-system event through the full pipeline (legacy support)."""
+        """Process a single file-system event through the full pipeline (legacy support).
+
+        Increments stats, routes the event, then returns the real threat assessment
+        so callers can react to the result rather than always receiving False.
+        """
         self.stats["modifications"] += 1
         self._on_monitor_event(event)
-        return {"threat": False, "reason": "processed", "severity": "info"}
+        return self.assess_threat(respond=False)
 
     def status(self) -> dict[str, Any]:
         monitor_snapshot = self.monitor.snapshot()

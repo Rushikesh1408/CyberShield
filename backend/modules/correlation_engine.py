@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -7,15 +8,17 @@ class CorrelationEngine:
     @staticmethod
     def _safe_float(value: object) -> float:
         try:
-            return float(value)
-        except (TypeError, ValueError):
+            result = float(value)
+            return result if math.isfinite(result) else 0.0
+        except (TypeError, ValueError, OverflowError):
             return 0.0
 
     @staticmethod
     def _safe_int(value: object, default: int = 0) -> int:
         try:
-            return int(float(value))
-        except (TypeError, ValueError):
+            result = int(float(value))
+            return result
+        except (TypeError, ValueError, OverflowError):
             return default
 
     def correlate(
@@ -52,7 +55,9 @@ class CorrelationEngine:
                     elif isinstance(w, str):
                         per_known_wallets.add(w.lower())
             if "wallet_address" in known:
-                per_known_wallets.add(str(known["wallet_address"]).lower())
+                addr = known["wallet_address"]
+                if addr is not None:
+                    per_known_wallets.add(str(addr).lower())
 
             wallet_overlap = bool(incoming_wallet_set.intersection(per_known_wallets))
             score = self._score_signature(incoming_signature, known)

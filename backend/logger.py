@@ -30,6 +30,7 @@ class JsonFormatter(logging.Formatter):
 
 class DBLogHandler(logging.Handler):
     def emit(self, record):
+        db = None
         try:
             from backend.db.database import SessionLocal
             from backend.db import models
@@ -40,9 +41,15 @@ class DBLogHandler(logging.Handler):
             )
             db.add(db_log)
             db.commit()
-            db.close()
-        except Exception:
-            pass  # Avoid recursion if DB is down
+        except Exception as exc:
+            # Use handleError (Python built-in) to print to stderr without recursion
+            self.handleError(record)
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass  # Avoid recursion if DB is down
 
 def get_logger(name="cybershield", json_logs=False, db_logs=True):
     logger = logging.getLogger(name)

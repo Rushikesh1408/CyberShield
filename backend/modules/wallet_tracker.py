@@ -47,7 +47,6 @@ class WalletTracker:
                 if not any(hint in lower_name for hint in RANSOM_NOTE_NAME_HINTS):
                     continue
 
-                scanned += 1
                 try:
                     # HEAD: file size guard to prevent reading huge files
                     try:
@@ -56,6 +55,7 @@ class WalletTracker:
                     except OSError:
                         continue
 
+                    scanned += 1  # Count only files we actually read
                     content = file_path.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue

@@ -47,7 +47,8 @@ class Database:
                     title TEXT NOT NULL,
                     details TEXT NOT NULL,
                     severity TEXT NOT NULL,
-                    fingerprint_match TEXT
+                    fingerprint_match TEXT,
+                    resolved_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS fingerprints (
@@ -78,6 +79,14 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
                 """)
+
+            alert_columns = {
+                str(row["name"]).lower()
+                for row in connection.execute("PRAGMA table_info(alerts)")
+            }
+            if "resolved_at" not in alert_columns:
+                connection.execute("ALTER TABLE alerts ADD COLUMN resolved_at TEXT")
+
             connection.commit()
 
     @staticmethod
@@ -182,15 +191,46 @@ class Database:
         severity: str = "medium",
         fingerprint_match: str | None = None,
     ) -> None:
+        normalized_status = str(status or "").upper()
+        resolved_at = self._now() if normalized_status == "SAFE" else None
+
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO alerts (timestamp, status, title, details, severity, fingerprint_match)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO alerts (timestamp, status, title, details, severity, fingerprint_match, resolved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (self._now(), status, title, details, severity, fingerprint_match),
+                (self._now(), status, title, details, severity, fingerprint_match, resolved_at),
             )
             connection.commit()
+
+    def resolve_alerts(self, statuses: list[str] | None = None) -> int:
+        with self._lock, self._connect() as connection:
+            if statuses:
+                normalized_statuses = [str(status).upper() for status in statuses]
+                placeholders = ", ".join("?" for _ in normalized_statuses)
+                cursor = connection.execute(
+                    f"""
+                    UPDATE alerts
+                    SET resolved_at = ?
+                    WHERE resolved_at IS NULL
+                      AND UPPER(status) IN ({placeholders})
+                    """,
+                    (self._now(), *normalized_statuses),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE alerts
+                    SET resolved_at = ?
+                    WHERE resolved_at IS NULL
+                      AND UPPER(status) <> 'SAFE'
+                    """,
+                    (self._now(),),
+                )
+
+            connection.commit()
+            return int(cursor.rowcount if cursor.rowcount is not None else 0)
 
     def upsert_fingerprint(self, fingerprint: dict[str, Any]) -> None:
         with self._lock, self._connect() as connection:
@@ -311,17 +351,30 @@ class Database:
             connection.commit()
             return int(cursor.rowcount if cursor.rowcount is not None else 0)
 
-    def fetch_alerts(self, limit: int = 50) -> list[dict[str, Any]]:
+    def fetch_alerts(self, limit: int = 50, *, active_only: bool = False) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            cursor = connection.execute(
-                """
-                SELECT timestamp, status, title, details, severity, fingerprint_match
-                FROM alerts
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+            if active_only:
+                cursor = connection.execute(
+                    """
+                    SELECT timestamp, status, title, details, severity, fingerprint_match, resolved_at
+                    FROM alerts
+                    WHERE resolved_at IS NULL
+                      AND UPPER(status) <> 'SAFE'
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    SELECT timestamp, status, title, details, severity, fingerprint_match, resolved_at
+                    FROM alerts
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
             return [dict(row) for row in cursor.fetchall()]
 
     def fetch_fingerprints(self) -> list[dict[str, Any]]:

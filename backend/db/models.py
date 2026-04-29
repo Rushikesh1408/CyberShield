@@ -37,7 +37,7 @@ class Node(Base):
 	id = Column(Integer, primary_key=True)
 	node_id = Column(String(64), unique=True)
 	ip_address = Column(String(128))
-	api_key = Column(String(128))
+	api_key_hash = Column(String(64))  # Store SHA-256 hash of the API key — never the plaintext
 	last_seen = Column(DateTime, default=datetime.utcnow)
 	status = Column(String(32), default='offline') # online, offline, degraded
 

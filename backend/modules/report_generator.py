@@ -36,9 +36,10 @@ class EvidenceReportGenerator:
         folder = self.incident_root / f"incident_{incident_id}"
 
         # Ensure folder is a child of incident_root (path traversal protection)
+        # Path.is_relative_to() is immune to the startswith("/tmp/abc" vs "/tmp/abcdef") false-positive.
         folder_resolved = folder.resolve()
         root_resolved = self.incident_root.resolve()
-        if not str(folder_resolved).startswith(str(root_resolved)):
+        if not folder_resolved.is_relative_to(root_resolved):
             raise ValueError("Invalid incident_id: path traversal detected")
 
         folder.mkdir(parents=True, exist_ok=True)

@@ -78,13 +78,15 @@ COMMAND_CENTER_SYSTEM_ENV = "CYBERSHIELD_COMMAND_CENTER_SYSTEM"
 SMS_TIMEOUT_SECONDS = 8
 SAFE_CONFIRMATION_CYCLES = 6
 ALERT_DISPATCH_COOLDOWN_SECONDS = 180
+ALERT_TIMELINE_RETENTION_SECONDS = 300
 HONEYTRAP_ENABLED_ENV = "CYBERSHIELD_HONEYTRAP_ENABLED"
 HONEYTRAP_BURST_THRESHOLD_ENV = "CYBERSHIELD_HONEYTRAP_BURST_THRESHOLD"
 HONEYTRAP_BURST_WINDOW_ENV = "CYBERSHIELD_HONEYTRAP_BURST_WINDOW_SECONDS"
 HONEYTRAP_AUTO_ISOLATE_ENV = "CYBERSHIELD_HONEYTRAP_AUTO_ISOLATE"
 HONEYTRAP_ISOLATION_MODE_ENV = "CYBERSHIELD_HONEYTRAP_ISOLATION_MODE"
 SOCKET_API_KEY_ENV = "CYBERSHIELD_SOCKET_API_KEY"
-DEFAULT_SOCKET_API_KEY = "CYBERSHIELD_SECURE_KEY"
+# No hardcoded default — the env var must be set for authenticated socket connections.
+# If the env var is missing the code below will treat it as "no auth required".
 SOCKET_EVENT_NAME = "cybershield_event"
 
 socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
@@ -137,7 +139,7 @@ def emit_event(event_type: str, data: dict[str, Any] | None = None) -> dict[str,
 def handle_socket_connect(auth: dict[str, Any] | None) -> bool | None:
     global _connected_clients
 
-    configured_api_key = str(os.environ.get(SOCKET_API_KEY_ENV, DEFAULT_SOCKET_API_KEY) or "").strip()
+    configured_api_key = str(os.environ.get(SOCKET_API_KEY_ENV, "") or "").strip()
     if not configured_api_key:
         with _socket_health_lock:
             _connected_clients += 1
@@ -147,7 +149,8 @@ def handle_socket_connect(auth: dict[str, Any] | None) -> bool | None:
     if isinstance(auth, dict):
         provided_api_key = str(auth.get("apiKey") or "").strip()
 
-    if provided_api_key != configured_api_key:
+    import secrets as _secrets
+    if not _secrets.compare_digest(provided_api_key, configured_api_key):
         return False
 
     with _socket_health_lock:
@@ -357,9 +360,14 @@ def _read_email_config() -> dict[str, str | int | bool]:
     if not smtp_port_raw:
         smtp_port_raw = "587"
 
+    try:
+        smtp_port = int(smtp_port_raw)
+    except (TypeError, ValueError):
+        smtp_port = 587
+
     return {
         "host": smtp_host,
-        "port": int(smtp_port_raw),
+        "port": smtp_port,
         "username": smtp_username,
         "password": smtp_password,
         "from_email": smtp_from_email,
@@ -425,6 +433,15 @@ class SystemController:
         self._command_center_alert_skip_logged_for_attack = False
         self._last_command_center_dispatch_at: float | None = None
         self._simulation_lock = threading.Lock()
+        self._simulation_status_lock = threading.Lock()
+        self._simulation_status: dict[str, Any] = {
+            "state": "idle",
+            "level": "",
+            "started_at": "",
+            "finished_at": "",
+            "error": "",
+            "result": None,
+        }
         self._honeytrap_enabled = _read_bool_env(HONEYTRAP_ENABLED_ENV, True)
         self._honeytrap_burst_threshold = max(1, _read_int_env(HONEYTRAP_BURST_THRESHOLD_ENV, 3))
         self._honeytrap_burst_window_seconds = max(
@@ -915,43 +932,132 @@ class SystemController:
             "burst_events": burst_events,
         }
 
+    def _run_attack_simulation_sync(self, *, level: str, wait_timeout: int) -> dict[str, Any]:
+        if self.pipeline is None or not self.pipeline.monitor.is_running:
+            self.restart()
+
+        self.database.log_event(
+            {
+                "event": "simulation_started",
+                "event_type": "info",
+                "action": "started",
+                "file_name": "",
+                "file_path": "",
+                "cpu_usage": 0.0,
+                "file_rate": 0.0,
+                "level": str(level or "high"),
+            }
+        )
+        self.database.insert_alert(
+            "UNDER_ATTACK",
+            "Attack Simulation Running",
+            "Attack simulation is actively mutating monitored files.",
+            severity="medium",
+        )
+
+        self.run_backup()
+        target = self._simulation_target_directory()
+        simulation_result = self._run_simulation_activity(target=target, level=level)
+
+        timeout_seconds = max(5, min(180, int(wait_timeout)))
+        deadline = time.time() + timeout_seconds
+        attack_seen = False
+        report_ready = ATTACK_REPORT_PATH.exists()
+
+        while time.time() < deadline:
+            snapshot = self.snapshot()
+            if str(snapshot.get("status") or "") == "UNDER_ATTACK":
+                attack_seen = True
+            if ATTACK_REPORT_PATH.exists():
+                report_ready = True
+                break
+            time.sleep(1.0)
+
+        summary = self.attack_summary()
+        result = {
+            "message": "simulation_triggered",
+            "simulation": simulation_result,
+            "attack_detected": bool(attack_seen or summary.get("files_encrypted", 0) > 0),
+            "report_ready": bool(report_ready),
+            "attack_summary": summary,
+            "monitor_paths": [str(path) for path in self.protected_directories],
+        }
+
+        self.database.log_event(
+            {
+                "event": "simulation_completed",
+                "event_type": "info",
+                "action": "completed",
+                "file_name": "",
+                "file_path": "",
+                "cpu_usage": 0.0,
+                "file_rate": 0.0,
+                "level": str(level or "high"),
+                "attack_detected": bool(result["attack_detected"]),
+                "report_ready": bool(result["report_ready"]),
+            }
+        )
+        self.database.insert_alert(
+            "SAFE",
+            "Attack Simulation Completed",
+            "Attack simulation completed and control returned to monitoring loop.",
+            severity="medium",
+        )
+
+        return result
+
     def run_attack_simulation(self, *, level: str, wait_timeout: int) -> dict[str, Any]:
         if not self._simulation_lock.acquire(blocking=False):
             raise RuntimeError("simulation_in_progress")
 
-        try:
-            if self.pipeline is None or not self.pipeline.monitor.is_running:
-                self.restart()
-
-            self.run_backup()
-            target = self._simulation_target_directory()
-            simulation_result = self._run_simulation_activity(target=target, level=level)
-
-            timeout_seconds = max(5, min(180, int(wait_timeout)))
-            deadline = time.time() + timeout_seconds
-            attack_seen = False
-            report_ready = ATTACK_REPORT_PATH.exists()
-
-            while time.time() < deadline:
-                snapshot = self.snapshot()
-                if str(snapshot.get("status") or "") == "UNDER_ATTACK":
-                    attack_seen = True
-                if ATTACK_REPORT_PATH.exists():
-                    report_ready = True
-                    break
-                time.sleep(1.0)
-
-            summary = self.attack_summary()
-            return {
-                "message": "simulation_triggered",
-                "simulation": simulation_result,
-                "attack_detected": bool(attack_seen or summary.get("files_encrypted", 0) > 0),
-                "report_ready": bool(report_ready),
-                "attack_summary": summary,
-                "monitor_paths": [str(path) for path in self.protected_directories],
+        with self._simulation_status_lock:
+            self._simulation_status = {
+                "state": "running",
+                "level": str(level or ""),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": "",
+                "error": "",
+                "result": None,
             }
-        finally:
-            self._simulation_lock.release()
+
+        def simulation_job() -> None:
+            try:
+                result = self._run_attack_simulation_sync(level=level, wait_timeout=wait_timeout)
+                with self._simulation_status_lock:
+                    self._simulation_status = {
+                        "state": "completed",
+                        "level": str(level or ""),
+                        "started_at": self._simulation_status.get("started_at", ""),
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "error": "",
+                        "result": result,
+                    }
+            except (RuntimeError, ValueError, OSError) as error:
+                with self._simulation_status_lock:
+                    self._simulation_status = {
+                        "state": "failed",
+                        "level": str(level or ""),
+                        "started_at": self._simulation_status.get("started_at", ""),
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "error": str(error),
+                        "result": None,
+                    }
+            finally:
+                self._simulation_lock.release()
+
+        worker = threading.Thread(
+            target=simulation_job,
+            name="cybershield-simulation-worker",
+            daemon=True,
+        )
+        worker.start()
+
+        with self._simulation_status_lock:
+            return dict(self._simulation_status)
+
+    def simulation_status(self) -> dict[str, Any]:
+        with self._simulation_status_lock:
+            return dict(self._simulation_status)
 
     def _start_engine(self) -> None:
         using_custom_monitor_paths = bool(str(os.environ.get(MONITOR_PATHS_ENV, "") or "").strip())
@@ -976,6 +1082,7 @@ class SystemController:
             daemon=True,
         )
         self._pipeline_thread.start()
+        self.database.resolve_alerts()
         self.database.log_event(
             {
                 "event": "monitoring_started",
@@ -1025,6 +1132,8 @@ class SystemController:
                 top_process = max(suspicious_processes, key=lambda item: float(item.get("score") or 0.0))
                 if isinstance(top_process, dict):
                     process_pid = int(top_process.get("pid") or 0)
+                    detection_context["process_name"] = str(top_process.get("name") or "")
+                    detection_context["process_path"] = str(top_process.get("path") or "")
                     detection_context["process_pid"] = process_pid
                     detection_context["process_tree"] = (
                         self.detection_service.get_process_tree(process_pid)
@@ -1038,6 +1147,14 @@ class SystemController:
         threat_detected = bool(detection_context and detection_context.get("threat_detected"))
         entropy_triggered = bool(detection_context and detection_context.get("entropy_triggered"))
         confidence = float(detection_context.get("confidence") or 0.0) if detection_context else 0.0
+        affected_files = detection_context.get("affected_files") if detection_context else []
+        source_path = ""
+        if isinstance(affected_files, list) and affected_files:
+            source_path = str(affected_files[0] or "")
+        if not source_path and self.protected_directories:
+            source_path = str(self.protected_directories[0])
+        process_name = str(detection_context.get("process_name") or "") if detection_context else ""
+        process_path = str(detection_context.get("process_path") or "") if detection_context else ""
         queue_overloaded = self.action_queue.qsize() >= self._max_intervention_queue_size
         should_queue = threat_detected and not queue_overloaded and self.safe_intervention_service is not None
 
@@ -1195,8 +1312,8 @@ class SystemController:
                         "event": "attack_detected",
                         "event_type": "critical",
                         "action": "flagged",
-                        "file_name": "",
-                        "file_path": "",
+                        "file_name": Path(source_path).name if source_path else "",
+                        "file_path": source_path,
                         "cpu_usage": cpu_usage,
                         "file_rate": files_per_second,
                         "score": score,
@@ -1204,6 +1321,10 @@ class SystemController:
                         "modifications": activity_count,
                         "accesses": activity_count,
                         "dna_mismatch_count": dna_mismatch_count,
+                        "process_name": process_name,
+                        "process_path": process_path,
+                        "process_pid": process_pid,
+                        "paths": [str(path) for path in self.protected_directories],
                     }
                 )
                 emit_event(
@@ -1211,7 +1332,9 @@ class SystemController:
                     {
                         "confidence": int(score),
                         "files_affected": int(activity_count),
-                        "source": str(self._dominant_activity_extension()),
+                        "source": source_path or self._dominant_activity_extension(),
+                        "process_name": process_name,
+                        "process_pid": process_pid,
                         "cpu_usage": round(cpu_usage, 2),
                         "file_rate": round(files_per_second, 2),
                     },
@@ -1312,6 +1435,7 @@ class SystemController:
             self._attack_active = False
             self._safe_cycle_streak = 0
             self._last_recovery_count = 0
+            self.database.resolve_alerts()
             self._emergency_alert_sent_for_attack = False
             self._emergency_alert_skip_logged_for_attack = False
             self._command_center_alert_sent_for_attack = False
@@ -1436,7 +1560,8 @@ class SystemController:
         try:
             smtp_client = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
             with smtp_client(smtp_host, smtp_port, timeout=SMS_TIMEOUT_SECONDS) as client:
-                if use_tls:
+                # Only call STARTTLS when using plain SMTP (not SMTP_SSL which is already encrypted)
+                if use_tls and not use_ssl:
                     client.starttls()
                 if smtp_username and smtp_password:
                     client.login(smtp_username, smtp_password)
@@ -1679,11 +1804,21 @@ class SystemController:
         # One outbound SMS attempt per attack cycle.
         self._emergency_alert_sent_for_attack = True
 
+        # Mask email for PII-safe logging: keep domain, mask local part
+        def _mask_email(addr: str) -> str:
+            if "@" in addr:
+                local, domain = addr.split("@", 1)
+                masked_local = local[:3] + "***" if len(local) > 3 else "***"
+                return f"{masked_local}@{domain}"
+            return "***"
+
+        masked_email = _mask_email(emergency_email)
+
         if sent:
             self.database.insert_alert(
                 "UNDER_ATTACK",
                 "Emergency Email Sent",
-                f"Emergency alert email sent to {emergency_email}.",
+                f"Emergency alert email sent (recipient masked for PII).",
                 severity="critical",
             )
             self.database.log_event(
@@ -1695,7 +1830,7 @@ class SystemController:
                     "file_path": "",
                     "cpu_usage": cpu_usage,
                     "file_rate": file_rate,
-                    "email": emergency_email,
+                    "email": masked_email,
                     "provider": "smtp",
                 }
             )
@@ -1716,7 +1851,7 @@ class SystemController:
                 "file_path": "",
                 "cpu_usage": cpu_usage,
                 "file_rate": file_rate,
-                "email": emergency_email,
+                "email": masked_email,
                 "provider": "smtp",
                 "error": provider_response,
             }
@@ -2158,6 +2293,16 @@ class SystemController:
                 "Early Threat Detection triggered",
                 "warning",
             ),
+            "simulation_started": (
+                "SIMULATION_STARTED",
+                "Attack simulation job started",
+                "info",
+            ),
+            "simulation_completed": (
+                "SIMULATION_COMPLETED",
+                "Attack simulation job completed",
+                "info",
+            ),
             "attack_detected": (
                 "ATTACK_DETECTED",
                 "Behavioral attack pattern confirmed",
@@ -2408,7 +2553,50 @@ def register_routes(flask_app: Flask) -> None:
 
     @flask_app.route("/api/alerts", methods=["GET"])
     def alerts() -> Any:
-        return jsonify({"alerts": _controller_from_app(flask_app).database.fetch_alerts(50)})
+        controller = _controller_from_app(flask_app)
+        snapshot = controller.snapshot()
+        sim_state = str(controller.simulation_status().get("state") or "idle").lower()
+        if str(snapshot.get("status") or "").upper() == "SAFE" and sim_state != "running":
+            controller.database.resolve_alerts()
+
+        active_alerts = controller.database.fetch_alerts(80, active_only=True)
+        timeline_alerts = controller.database.fetch_alerts(250, active_only=False)
+        cutoff_timestamp = datetime.now(timezone.utc).timestamp() - ALERT_TIMELINE_RETENTION_SECONDS
+
+        def _to_epoch_seconds(raw_timestamp: Any) -> float:
+            value = str(raw_timestamp or "").strip()
+            if not value:
+                return 0.0
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return 0.0
+
+        recent_non_safe = [
+            alert
+            for alert in timeline_alerts
+            if str(alert.get("status") or "").upper() != "SAFE"
+            and _to_epoch_seconds(alert.get("timestamp")) >= cutoff_timestamp
+        ]
+
+        merged_alerts: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for alert in [*active_alerts, *recent_non_safe]:
+            key = "|".join(
+                [
+                    str(alert.get("timestamp") or ""),
+                    str(alert.get("status") or ""),
+                    str(alert.get("title") or ""),
+                    str(alert.get("details") or ""),
+                ]
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            merged_alerts.append(alert)
+
+        merged_alerts.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
+        return jsonify({"alerts": merged_alerts[:80]})
 
     @flask_app.route("/api/logs", methods=["GET"])
     def logs() -> Any:
@@ -2424,6 +2612,11 @@ def register_routes(flask_app: Flask) -> None:
 
     @flask_app.route("/api/logs/clear", methods=["POST"])
     def clear_logs() -> Any:
+        import secrets as _secrets
+        expected_key = str(os.environ.get("API_KEY", "") or "").strip()
+        provided_key = str(request.headers.get("x-api-key") or "").strip()
+        if not expected_key or not _secrets.compare_digest(provided_key, expected_key):
+            return jsonify({"message": "unauthorized"}), 403
         deleted = _controller_from_app(flask_app).database.clear_logs()
         return jsonify({"message": "logs_cleared", "deleted": deleted})
 
@@ -2447,7 +2640,15 @@ def register_routes(flask_app: Flask) -> None:
         if not file_path:
             return jsonify({"message": "file_path_required"}), 400
 
-        restored = controller.recover_file(file_path)
+        # Path-traversal guard: ensure the resolved path is under BACKUP_ROOT
+        try:
+            resolved = Path(file_path).resolve()
+            if not resolved.is_relative_to(BACKUP_ROOT.resolve()):
+                return jsonify({"message": "invalid_file_path"}), 400
+        except (OSError, ValueError):
+            return jsonify({"message": "invalid_file_path"}), 400
+
+        restored = controller.recover_file(str(resolved))
         if restored is None:
             return jsonify({"message": "backup_not_found", "file_path": file_path}), 404
 
@@ -2545,18 +2746,30 @@ def register_routes(flask_app: Flask) -> None:
         except OSError as error:
             return jsonify({"message": "simulation_failed", "error": str(error)}), 500
 
-        return jsonify(result)
+        return jsonify({"message": "simulation_started", "simulation_status": result}), 202
+
+    @flask_app.route("/api/simulate/status", methods=["GET"])
+    def simulation_status() -> Any:
+        return jsonify(_controller_from_app(flask_app).simulation_status())
 
     @flask_app.route("/api/intervention/handle", methods=["POST"])
     def handle_attack() -> Any:
         controller = _controller_from_app(flask_app)
         body = request.get_json(silent=True) or {}
         try:
+            lookback_seconds = max(0.5, min(300.0, float(body.get("lookback_seconds", 5.0))))
+            cpu_threshold = max(1.0, min(100.0, float(body.get("cpu_threshold", 65.0))))
+            terminate_threshold = max(1.0, min(100.0, float(body.get("terminate_threshold", 60.0))))
+            recheck_delay_seconds = max(0.1, min(60.0, float(body.get("recheck_delay_seconds", 1.5))))
+        except (TypeError, ValueError) as error:
+            return jsonify({"message": "invalid_intervention_parameters", "error": str(error)}), 400
+
+        try:
             result = controller.handle_attack(
-                lookback_seconds=float(body.get("lookback_seconds", 5.0)),
-                cpu_threshold=float(body.get("cpu_threshold", 65.0)),
-                terminate_threshold=float(body.get("terminate_threshold", 60.0)),
-                recheck_delay_seconds=float(body.get("recheck_delay_seconds", 1.5)),
+                lookback_seconds=lookback_seconds,
+                cpu_threshold=cpu_threshold,
+                terminate_threshold=terminate_threshold,
+                recheck_delay_seconds=recheck_delay_seconds,
             )
         except (TypeError, ValueError) as error:
             return jsonify({"message": "invalid_intervention_parameters", "error": str(error)}), 400

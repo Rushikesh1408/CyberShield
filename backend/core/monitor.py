@@ -239,7 +239,13 @@ class MonitorHandler(FileSystemEventHandler):
             'is_directory': event.is_directory
         }
         if self.event_callback:
-            self.event_callback(norm)
+            try:
+                self.event_callback(norm)
+            except Exception as e:
+                import logging
+                logging.getLogger("cybershield.monitor").error(
+                    f"[MonitorHandler] event_callback raised: {e} — event: {norm}"
+                )
 
 
 class FileMonitor:
@@ -247,8 +253,11 @@ class FileMonitor:
         self.paths = paths if isinstance(paths, list) else [paths]
         self.event_callback = event_callback
         self.observer = Observer()
+        self.is_running = False
 
     def start(self):
+        if self.is_running:
+            return
         handler = MonitorHandler(self.event_callback)
         for path in self.paths:
             if os.path.exists(path):
@@ -256,11 +265,20 @@ class FileMonitor:
             else:
                 print(f"[Monitor] Warning: Path does not exist: {path}")
         self.observer.start()
+        self.is_running = True
         print(f"[Monitor] Started monitoring: {self.paths}")
 
     def stop(self):
+        if not self.is_running:
+            return
         self.observer.stop()
-        self.observer.join()
+        self.observer.join(timeout=10)
+        if self.observer.is_alive():
+            import logging
+            logging.getLogger("cybershield.monitor").warning(
+                "[FileMonitor] Observer did not stop within timeout"
+            )
+        self.is_running = False
         print("[Monitor] Stopped monitoring.")
 
 

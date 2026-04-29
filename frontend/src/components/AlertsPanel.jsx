@@ -105,7 +105,7 @@ export default function AlertsPanel({ alerts }) {
       <div className="mt-5 max-h-[34rem] space-y-3 overflow-y-auto pr-1">
         {visibleAlerts.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-900/50 p-5 text-sm text-slate-400">
-            No alerts yet. The system is in SAFE mode.
+            No active alerts. The system is in SAFE mode.
           </div>
         ) : (
           visibleAlerts.map((alert, index) => {
