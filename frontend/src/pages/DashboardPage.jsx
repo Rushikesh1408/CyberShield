@@ -8,7 +8,9 @@ import FingerprintPanel from '../components/FingerprintPanel';
 import LogsTimeline from '../components/LogsTimeline';
 import StatusCard from '../components/StatusCard';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+// API key is required — never falls back to a hardcoded value in production
+const API_KEY = import.meta.env.VITE_API_KEY ?? '';
 
 const initialSnapshot = {
   status: 'SAFE',
@@ -46,12 +48,21 @@ function timeLabel(timestamp) {
   });
 }
 
+/**
+ * Fetch JSON from the API.
+ * Automatically attaches x-api-key header on every request.
+ * The backend returns {status, data, error} — this helper unwraps `data`.
+ */
 async function fetchJson(path, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   const method = (options.method ?? 'GET').toUpperCase();
   const headers = { ...(options.headers ?? {}) };
+
+  // Always include API key
+  headers['x-api-key'] = API_KEY;
+
   if (method !== 'GET' && method !== 'HEAD' && options.body !== undefined) {
     headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
   }
@@ -65,10 +76,23 @@ async function fetchJson(path, options = {}, timeoutMs = 8000) {
   window.clearTimeout(timeoutId);
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let errorMsg = `Request failed: ${response.status}`;
+    try {
+      const payload = await response.json();
+      errorMsg = payload.detail ?? payload.message ?? errorMsg;
+    } catch {
+      // ignore JSON parse failure
+    }
+    throw new Error(String(errorMsg));
   }
 
-  return response.json();
+  const json = await response.json();
+  // Unwrap standardised envelope {status, data, error}
+  if (json && typeof json === 'object' && 'data' in json && json.status === 'success') {
+    return json.data;
+  }
+  // Legacy / non-standard response — return as-is
+  return json;
 }
 
 export default function DashboardPage() {
@@ -131,7 +155,7 @@ export default function DashboardPage() {
         ]);
 
       setSnapshot({
-        status: statusData.status,
+        status: statusData.status ?? 'SAFE',
         is_monitoring: Boolean(statusData.is_monitoring),
         monitor_paths: statusData.monitor_paths ?? [],
         monitoring_message:
@@ -174,7 +198,7 @@ export default function DashboardPage() {
     };
   }, []);
 
-  const isUnderAttack = snapshot.status === 'UNDER_ATTACK';
+  const isUnderAttack = snapshot.status === 'THREAT' || snapshot.status === 'UNDER_ATTACK';
   const toNumericValue = (value) => {
     const numericValue = Number(value);
     return Number.isNaN(numericValue) ? 0 : numericValue;
@@ -189,9 +213,7 @@ export default function DashboardPage() {
   const handleStart = async () => {
     setBusy(true);
     try {
-      await fetchJson('/api/start', {
-        method: 'POST',
-      }, 20000);
+      await fetchJson('/api/start', { method: 'POST' }, 20000);
       await loadSnapshot();
     } catch (requestError) {
       setError(requestError.message);
@@ -229,7 +251,7 @@ export default function DashboardPage() {
     setIsRunningBackup(true);
     try {
       const response = await fetchJson('/api/backup/run', { method: 'POST' });
-      setBackupMessage(`Backup completed. Created versions: ${response.created ?? 0}`);
+      setBackupMessage(`Backup completed. Created: ${response.created ?? 0} snapshot(s).`);
       await loadSnapshot();
       await loadBackupStatus();
     } catch (requestError) {
@@ -242,7 +264,7 @@ export default function DashboardPage() {
   const handleRecoverFile = async (filePath) => {
     setIsRecovering(true);
     try {
-      await fetchJson('/api/backup/recover', {
+      await fetchJson('/api/recover', {
         method: 'POST',
         body: JSON.stringify({ file_path: filePath }),
       });
@@ -284,9 +306,11 @@ export default function DashboardPage() {
     try {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+      // Include API key on this raw fetch too
       const response = await fetch(`${API_BASE}/api/report/download`, {
         method: 'GET',
         signal: controller.signal,
+        headers: { 'x-api-key': API_KEY },
       });
       window.clearTimeout(timeoutId);
 
@@ -294,7 +318,7 @@ export default function DashboardPage() {
         let message = `Request failed: ${response.status}`;
         try {
           const payload = await response.json();
-          message = payload.message ? String(payload.message) : message;
+          message = payload.detail ?? payload.message ?? message;
         } catch {
           // Ignore JSON parsing errors for non-JSON responses.
         }
@@ -333,7 +357,7 @@ export default function DashboardPage() {
                 CyberShield AI
               </div>
               <h1 className="mt-5 max-w-3xl text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-                Real-Time Ransomware Defense & Zero Data Loss System
+                Real-Time Ransomware Defense System Live
               </h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-300">
                 Automatically monitor protected system directories, detect ransomware-like
@@ -361,19 +385,19 @@ export default function DashboardPage() {
               <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <StatusCard
                   title="File Rate"
-                  value={`${snapshot.metrics.files_per_second.toFixed(1)} /s`}
+                  value={`${(snapshot.metrics.files_per_second ?? 0).toFixed(1)} /s`}
                   caption="Rolling files per second"
                   accent="blue"
                 />
                 <StatusCard
                   title="CPU"
-                  value={`${snapshot.metrics.cpu_percent.toFixed(1)}%`}
+                  value={`${cpuDisplayValue.toFixed(1)}%`}
                   caption="Host CPU spike check"
                   accent={isUnderAttack ? 'rose' : 'green'}
                 />
                 <StatusCard
                   title="Modifications"
-                  value={snapshot.metrics.modifications}
+                  value={snapshot.metrics.modifications ?? 0}
                   caption="Recent file write count"
                   accent="amber"
                 />
@@ -399,6 +423,7 @@ export default function DashboardPage() {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
+                  id="btn-start-monitoring"
                   disabled={busy}
                   onClick={handleStart}
                   className="rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
@@ -407,6 +432,7 @@ export default function DashboardPage() {
                 </button>
                 <button
                   type="button"
+                  id="btn-stop-monitoring"
                   disabled={busy}
                   onClick={handleStop}
                   className="rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"

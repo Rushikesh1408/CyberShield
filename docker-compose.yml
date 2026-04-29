@@ -1,0 +1,45 @@
+version: '3.8'
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cybershield-backend
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5000
+      JWT_SECRET: ${JWT_SECRET}
+      API_KEY: ${API_KEY}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      CYBERSHIELD_MONITOR_PATHS: ${CYBERSHIELD_MONITOR_PATHS:-/app/protected_folder}
+    volumes:
+      - ./data:/app/data
+      - ./backup:/app/backup
+      - ${CYBERSHIELD_MONITOR_PATHS:-./protected_folder}:/app/protected_folder
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: cybershield-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+    restart: unless-stopped
+  db:
+    image: postgres:16-alpine
+    container_name: cybershield-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
