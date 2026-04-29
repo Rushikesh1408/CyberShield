@@ -78,6 +78,79 @@ class Database:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS attack_signatures (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signature_id TEXT NOT NULL UNIQUE,
+                    timestamp TEXT NOT NULL,
+                    process_name TEXT,
+                    entropy REAL NOT NULL,
+                    file_rate REAL NOT NULL,
+                    cpu_usage REAL NOT NULL,
+                    timing_ms REAL NOT NULL,
+                    confidence REAL NOT NULL,
+                    occurrences INTEGER NOT NULL DEFAULT 1,
+                    metadata TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_attack_signatures_timestamp_desc
+                ON attack_signatures (timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS wallet_indicators (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    incident_id TEXT,
+                    wallet_type TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    source_file TEXT,
+                    UNIQUE (wallet_address, source_file)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_wallet_indicators_timestamp_desc
+                ON wallet_indicators (timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS network_connections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    incident_id TEXT,
+                    pid INTEGER NOT NULL,
+                    process_name TEXT,
+                    remote_ip TEXT,
+                    remote_port INTEGER,
+                    status TEXT,
+                    protocol TEXT,
+                    metadata TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_network_connections_timestamp_desc
+                ON network_connections (timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS persistence_findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    incident_id TEXT,
+                    finding_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    details TEXT,
+                    metadata TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_persistence_findings_timestamp_desc
+                ON persistence_findings (timestamp DESC);
+
+                CREATE TABLE IF NOT EXISTS incident_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    incident_id TEXT NOT NULL UNIQUE,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    signature_id TEXT,
+                    report_path TEXT,
+                    metadata TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_incident_reports_timestamp_desc
+                ON incident_reports (timestamp DESC);
                 """)
 
             alert_columns = {
@@ -410,6 +483,296 @@ class Database:
                 """)
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def upsert_attack_signature(self, signature: dict[str, Any]) -> int:
+        signature_id = str(signature.get("signature_id") or "").strip()
+        if not signature_id:
+            raise ValueError("signature_id_required")
+
+        metadata = json.dumps(signature.get("metadata") or {}, sort_keys=True)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO attack_signatures (
+                    signature_id,
+                    timestamp,
+                    process_name,
+                    entropy,
+                    file_rate,
+                    cpu_usage,
+                    timing_ms,
+                    confidence,
+                    occurrences,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                ON CONFLICT(signature_id) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    process_name = excluded.process_name,
+                    entropy = excluded.entropy,
+                    file_rate = excluded.file_rate,
+                    cpu_usage = excluded.cpu_usage,
+                    timing_ms = excluded.timing_ms,
+                    confidence = excluded.confidence,
+                    metadata = excluded.metadata,
+                    occurrences = attack_signatures.occurrences + 1
+                """,
+                (
+                    signature_id,
+                    self._now(),
+                    str(signature.get("process_name") or "unknown"),
+                    float(signature.get("entropy") or 0.0),
+                    float(signature.get("file_rate") or 0.0),
+                    float(signature.get("cpu_usage") or 0.0),
+                    float(signature.get("timing_ms") or 0.0),
+                    float(signature.get("confidence") or 0.0),
+                    metadata,
+                ),
+            )
+            cursor = connection.execute(
+                "SELECT id FROM attack_signatures WHERE signature_id = ? LIMIT 1",
+                (signature_id,),
+            )
+            row = cursor.fetchone()
+            connection.commit()
+            return int(row["id"]) if row else 0
+
+    def fetch_attack_signatures(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT id, signature_id, timestamp, process_name, entropy, file_rate,
+                       cpu_usage, timing_ms, confidence, occurrences, metadata
+                FROM attack_signatures
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+            rows: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get("metadata"):
+                    try:
+                        item["metadata"] = json.loads(str(item["metadata"]))
+                    except json.JSONDecodeError:
+                        item["metadata"] = {}
+                rows.append(item)
+            return rows
+
+    def insert_wallet_indicators(
+        self,
+        wallets: list[dict[str, str]],
+        *,
+        incident_id: str | None = None,
+    ) -> int:
+        inserted = 0
+        with self._lock, self._connect() as connection:
+            for wallet in wallets:
+                wallet_address = str(wallet.get("address") or "").strip()
+                wallet_type = str(wallet.get("type") or "unknown").strip().lower()
+                source_file = str(wallet.get("source_file") or "").strip()
+                if not wallet_address:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO wallet_indicators (timestamp, incident_id, wallet_type, wallet_address, source_file)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(wallet_address, source_file) DO NOTHING
+                    """,
+                    (
+                        self._now(),
+                        incident_id,
+                        wallet_type,
+                        wallet_address,
+                        source_file,
+                    ),
+                )
+                inserted += 1
+            connection.commit()
+        return inserted
+
+    def fetch_wallet_indicators(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT timestamp, incident_id, wallet_type, wallet_address, source_file
+                FROM wallet_indicators
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def insert_network_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        incident_id: str | None = None,
+    ) -> int:
+        inserted = 0
+        with self._lock, self._connect() as connection:
+            for event in events:
+                metadata = json.dumps(event.get("metadata") or {}, sort_keys=True)
+                connection.execute(
+                    """
+                    INSERT INTO network_connections (
+                        timestamp,
+                        incident_id,
+                        pid,
+                        process_name,
+                        remote_ip,
+                        remote_port,
+                        status,
+                        protocol,
+                        metadata
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._now(),
+                        incident_id,
+                        int(event.get("pid") or 0),
+                        str(event.get("process_name") or ""),
+                        str(event.get("remote_ip") or ""),
+                        int(event.get("remote_port") or 0),
+                        str(event.get("status") or "unknown"),
+                        str(event.get("protocol") or "unknown"),
+                        metadata,
+                    ),
+                )
+                inserted += 1
+            connection.commit()
+        return inserted
+
+    def fetch_network_events(self, limit: int = 250) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT timestamp, incident_id, pid, process_name, remote_ip, remote_port, status, protocol, metadata
+                FROM network_connections
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+            rows: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get("metadata"):
+                    try:
+                        item["metadata"] = json.loads(str(item["metadata"]))
+                    except json.JSONDecodeError:
+                        item["metadata"] = {}
+                rows.append(item)
+            return rows
+
+    def insert_persistence_findings(
+        self,
+        findings: list[dict[str, Any]],
+        *,
+        incident_id: str | None = None,
+    ) -> int:
+        inserted = 0
+        with self._lock, self._connect() as connection:
+            for finding in findings:
+                connection.execute(
+                    """
+                    INSERT INTO persistence_findings (timestamp, incident_id, finding_type, severity, details, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self._now(),
+                        incident_id,
+                        str(finding.get("finding_type") or "unknown"),
+                        str(finding.get("severity") or "medium"),
+                        str(finding.get("details") or ""),
+                        json.dumps(finding.get("metadata") or {}, sort_keys=True),
+                    ),
+                )
+                inserted += 1
+            connection.commit()
+        return inserted
+
+    def fetch_persistence_findings(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT timestamp, incident_id, finding_type, severity, details, metadata
+                FROM persistence_findings
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+            rows: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get("metadata"):
+                    try:
+                        item["metadata"] = json.loads(str(item["metadata"]))
+                    except json.JSONDecodeError:
+                        item["metadata"] = {}
+                rows.append(item)
+            return rows
+
+    def upsert_incident_report(self, report: dict[str, Any]) -> None:
+        incident_id = str(report.get("incident_id") or "").strip()
+        if not incident_id:
+            raise ValueError("incident_id_required")
+
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO incident_reports (
+                    incident_id,
+                    timestamp,
+                    status,
+                    severity,
+                    signature_id,
+                    report_path,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(incident_id) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    status = excluded.status,
+                    severity = excluded.severity,
+                    signature_id = excluded.signature_id,
+                    report_path = excluded.report_path,
+                    metadata = excluded.metadata
+                """,
+                (
+                    incident_id,
+                    self._now(),
+                    str(report.get("status") or "UNDER_ATTACK"),
+                    str(report.get("severity") or "high"),
+                    str(report.get("signature_id") or ""),
+                    str(report.get("report_path") or ""),
+                    json.dumps(report.get("metadata") or {}, sort_keys=True),
+                ),
+            )
+            connection.commit()
+
+    def fetch_incident_reports(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT incident_id, timestamp, status, severity, signature_id, report_path, metadata
+                FROM incident_reports
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+            rows: list[dict[str, Any]] = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get("metadata"):
+                    try:
+                        item["metadata"] = json.loads(str(item["metadata"]))
+                    except json.JSONDecodeError:
+                        item["metadata"] = {}
+                rows.append(item)
+            return rows
 
     def set_setting(self, key: str, value: str) -> None:
         with self._lock, self._connect() as connection:
