@@ -42,6 +42,14 @@ def create_app() -> Flask:
     flask_app = Flask(__name__)
     config = AppConfig.from_env()
     flask_app.config.from_mapping(config.flask_mapping())
+
+    @flask_app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, x-api-key"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        return response
+
     register_routes(flask_app)
     init_socketio(flask_app)
     return flask_app

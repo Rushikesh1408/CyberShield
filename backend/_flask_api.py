@@ -85,7 +85,8 @@ HONEYTRAP_BURST_WINDOW_ENV = "CYBERSHIELD_HONEYTRAP_BURST_WINDOW_SECONDS"
 HONEYTRAP_AUTO_ISOLATE_ENV = "CYBERSHIELD_HONEYTRAP_AUTO_ISOLATE"
 HONEYTRAP_ISOLATION_MODE_ENV = "CYBERSHIELD_HONEYTRAP_ISOLATION_MODE"
 SOCKET_API_KEY_ENV = "CYBERSHIELD_SOCKET_API_KEY"
-DEFAULT_SOCKET_API_KEY = "CYBERSHIELD_SECURE_KEY"
+# No hardcoded default — the env var must be set for authenticated socket connections.
+# If the env var is missing the code below will treat it as "no auth required".
 SOCKET_EVENT_NAME = "cybershield_event"
 
 socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
@@ -138,7 +139,7 @@ def emit_event(event_type: str, data: dict[str, Any] | None = None) -> dict[str,
 def handle_socket_connect(auth: dict[str, Any] | None) -> bool | None:
     global _connected_clients
 
-    configured_api_key = str(os.environ.get(SOCKET_API_KEY_ENV, DEFAULT_SOCKET_API_KEY) or "").strip()
+    configured_api_key = str(os.environ.get(SOCKET_API_KEY_ENV, "") or "").strip()
     if not configured_api_key:
         with _socket_health_lock:
             _connected_clients += 1
@@ -148,7 +149,8 @@ def handle_socket_connect(auth: dict[str, Any] | None) -> bool | None:
     if isinstance(auth, dict):
         provided_api_key = str(auth.get("apiKey") or "").strip()
 
-    if provided_api_key != configured_api_key:
+    import secrets as _secrets
+    if not _secrets.compare_digest(provided_api_key, configured_api_key):
         return False
 
     with _socket_health_lock:
@@ -358,9 +360,14 @@ def _read_email_config() -> dict[str, str | int | bool]:
     if not smtp_port_raw:
         smtp_port_raw = "587"
 
+    try:
+        smtp_port = int(smtp_port_raw)
+    except (TypeError, ValueError):
+        smtp_port = 587
+
     return {
         "host": smtp_host,
-        "port": int(smtp_port_raw),
+        "port": smtp_port,
         "username": smtp_username,
         "password": smtp_password,
         "from_email": smtp_from_email,
@@ -1553,7 +1560,8 @@ class SystemController:
         try:
             smtp_client = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
             with smtp_client(smtp_host, smtp_port, timeout=SMS_TIMEOUT_SECONDS) as client:
-                if use_tls:
+                # Only call STARTTLS when using plain SMTP (not SMTP_SSL which is already encrypted)
+                if use_tls and not use_ssl:
                     client.starttls()
                 if smtp_username and smtp_password:
                     client.login(smtp_username, smtp_password)
@@ -1796,11 +1804,21 @@ class SystemController:
         # One outbound SMS attempt per attack cycle.
         self._emergency_alert_sent_for_attack = True
 
+        # Mask email for PII-safe logging: keep domain, mask local part
+        def _mask_email(addr: str) -> str:
+            if "@" in addr:
+                local, domain = addr.split("@", 1)
+                masked_local = local[:3] + "***" if len(local) > 3 else "***"
+                return f"{masked_local}@{domain}"
+            return "***"
+
+        masked_email = _mask_email(emergency_email)
+
         if sent:
             self.database.insert_alert(
                 "UNDER_ATTACK",
                 "Emergency Email Sent",
-                f"Emergency alert email sent to {emergency_email}.",
+                f"Emergency alert email sent (recipient masked for PII).",
                 severity="critical",
             )
             self.database.log_event(
@@ -1812,7 +1830,7 @@ class SystemController:
                     "file_path": "",
                     "cpu_usage": cpu_usage,
                     "file_rate": file_rate,
-                    "email": emergency_email,
+                    "email": masked_email,
                     "provider": "smtp",
                 }
             )
@@ -1833,7 +1851,7 @@ class SystemController:
                 "file_path": "",
                 "cpu_usage": cpu_usage,
                 "file_rate": file_rate,
-                "email": emergency_email,
+                "email": masked_email,
                 "provider": "smtp",
                 "error": provider_response,
             }
@@ -2434,7 +2452,7 @@ def register_routes(flask_app: Flask) -> None:
     @flask_app.after_request
     def add_headers(response):
         response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, x-api-key"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         return response
 
@@ -2594,6 +2612,11 @@ def register_routes(flask_app: Flask) -> None:
 
     @flask_app.route("/api/logs/clear", methods=["POST"])
     def clear_logs() -> Any:
+        import secrets as _secrets
+        expected_key = str(os.environ.get("API_KEY", "") or "").strip()
+        provided_key = str(request.headers.get("x-api-key") or "").strip()
+        if not expected_key or not _secrets.compare_digest(provided_key, expected_key):
+            return jsonify({"message": "unauthorized"}), 403
         deleted = _controller_from_app(flask_app).database.clear_logs()
         return jsonify({"message": "logs_cleared", "deleted": deleted})
 
@@ -2617,7 +2640,15 @@ def register_routes(flask_app: Flask) -> None:
         if not file_path:
             return jsonify({"message": "file_path_required"}), 400
 
-        restored = controller.recover_file(file_path)
+        # Path-traversal guard: ensure the resolved path is under BACKUP_ROOT
+        try:
+            resolved = Path(file_path).resolve()
+            if not resolved.is_relative_to(BACKUP_ROOT.resolve()):
+                return jsonify({"message": "invalid_file_path"}), 400
+        except (OSError, ValueError):
+            return jsonify({"message": "invalid_file_path"}), 400
+
+        restored = controller.recover_file(str(resolved))
         if restored is None:
             return jsonify({"message": "backup_not_found", "file_path": file_path}), 404
 
@@ -2726,11 +2757,19 @@ def register_routes(flask_app: Flask) -> None:
         controller = _controller_from_app(flask_app)
         body = request.get_json(silent=True) or {}
         try:
+            lookback_seconds = max(0.5, min(300.0, float(body.get("lookback_seconds", 5.0))))
+            cpu_threshold = max(1.0, min(100.0, float(body.get("cpu_threshold", 65.0))))
+            terminate_threshold = max(1.0, min(100.0, float(body.get("terminate_threshold", 60.0))))
+            recheck_delay_seconds = max(0.1, min(60.0, float(body.get("recheck_delay_seconds", 1.5))))
+        except (TypeError, ValueError) as error:
+            return jsonify({"message": "invalid_intervention_parameters", "error": str(error)}), 400
+
+        try:
             result = controller.handle_attack(
-                lookback_seconds=float(body.get("lookback_seconds", 5.0)),
-                cpu_threshold=float(body.get("cpu_threshold", 65.0)),
-                terminate_threshold=float(body.get("terminate_threshold", 60.0)),
-                recheck_delay_seconds=float(body.get("recheck_delay_seconds", 1.5)),
+                lookback_seconds=lookback_seconds,
+                cpu_threshold=cpu_threshold,
+                terminate_threshold=terminate_threshold,
+                recheck_delay_seconds=recheck_delay_seconds,
             )
         except (TypeError, ValueError) as error:
             return jsonify({"message": "invalid_intervention_parameters", "error": str(error)}), 400

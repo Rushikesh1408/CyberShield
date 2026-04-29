@@ -6,6 +6,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Iterable
+import os
+from datetime import datetime
 
 import psutil
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -14,6 +16,10 @@ from watchdog.observers import Observer
 # Global event counter for simple diagnostics and hackathon demos.
 GLOBAL_EVENT_COUNTER = {"value": 0}
 GLOBAL_EVENT_COUNTER_LOCK = threading.Lock()
+
+IGNORED_EXTENSIONS = {'.tmp', '.swp', '.DS_Store', '.part', '.crdownload', '.lnk'}
+IGNORED_PREFIXES = {'~', '.'}
+IGNORED_DIRS = {'__pycache__', '.git', '.vscode', 'node_modules'}
 
 
 @dataclass(frozen=True)
@@ -211,6 +217,69 @@ class _WatchHandler(FileSystemEventHandler):
             self.monitor.record_event(action="deleted", path=src_path)
         if dest_path:
             self.monitor.record_event(action="created", path=dest_path)
+
+
+# Legacy FileMonitor class kept for backward compatibility
+class MonitorHandler(FileSystemEventHandler):
+    def __init__(self, event_callback=None):
+        self.event_callback = event_callback
+
+    def on_any_event(self, event):
+        base = os.path.basename(event.src_path)
+        if any(base.endswith(ext) for ext in IGNORED_EXTENSIONS):
+            return
+        if any(base.startswith(prefix) for prefix in IGNORED_PREFIXES):
+            return
+        if any(part in IGNORED_DIRS for part in event.src_path.split(os.sep)):
+            return
+        norm = {
+            'event_type': event.event_type,
+            'file_path': os.path.abspath(event.src_path),
+            'timestamp': datetime.utcnow().isoformat(),
+            'is_directory': event.is_directory
+        }
+        if self.event_callback:
+            try:
+                self.event_callback(norm)
+            except Exception as e:
+                import logging
+                logging.getLogger("cybershield.monitor").error(
+                    f"[MonitorHandler] event_callback raised: {e} — event: {norm}"
+                )
+
+
+class FileMonitor:
+    def __init__(self, paths, event_callback=None):
+        self.paths = paths if isinstance(paths, list) else [paths]
+        self.event_callback = event_callback
+        self.observer = Observer()
+        self.is_running = False
+
+    def start(self):
+        if self.is_running:
+            return
+        handler = MonitorHandler(self.event_callback)
+        for path in self.paths:
+            if os.path.exists(path):
+                self.observer.schedule(handler, path, recursive=True)
+            else:
+                print(f"[Monitor] Warning: Path does not exist: {path}")
+        self.observer.start()
+        self.is_running = True
+        print(f"[Monitor] Started monitoring: {self.paths}")
+
+    def stop(self):
+        if not self.is_running:
+            return
+        self.observer.stop()
+        self.observer.join(timeout=10)
+        if self.observer.is_alive():
+            import logging
+            logging.getLogger("cybershield.monitor").warning(
+                "[FileMonitor] Observer did not stop within timeout"
+            )
+        self.is_running = False
+        print("[Monitor] Stopped monitoring.")
 
 
 def default_monitor_paths() -> list[Path]:

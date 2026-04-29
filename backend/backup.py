@@ -169,6 +169,27 @@ class BackupManager:
         self._status_cache = None
         self._status_cache_at = 0.0
 
+    @staticmethod
+    def _as_int(value: object, default: int = 0) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                return default
+        return default
+
+    @staticmethod
+    def _as_str_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str)]
+
     def _record_backup_write(
         self,
         source_path: Path,
@@ -188,8 +209,9 @@ class BackupManager:
         source_key = str(source_path.resolve())
         if source_key not in self._known_sources:
             self._known_sources.add(source_key)
-            self._status_cache["files_secured"] = int(self._status_cache.get("files_secured", 0)) + 1
+            self._status_cache["files_secured"] = self._as_int(self._status_cache.get("files_secured", 0)) + 1
 
+        # Use branch's safer version_delta approach
         current_versions = int(self._status_cache.get("backup_versions", 0))
         self._status_cache["backup_versions"] = max(0, current_versions + int(version_delta))
 
@@ -199,7 +221,7 @@ class BackupManager:
         ).isoformat()
         self._status_cache["last_backup_time"] = timestamp
 
-        recent_files = list(self._status_cache.get("recent_files", []))
+        recent_files = self._as_str_list(self._status_cache.get("recent_files", []))
         if source_key in recent_files:
             recent_files.remove(source_key)
         recent_files.insert(0, source_key)
@@ -209,7 +231,7 @@ class BackupManager:
     @staticmethod
     def _clone_status_payload(payload: dict[str, object]) -> dict[str, object]:
         clone = dict(payload)
-        clone["recent_files"] = list(payload.get("recent_files", []))
+        clone["recent_files"] = BackupManager._as_str_list(payload.get("recent_files", []))
         return clone
 
     def backup_status(self, *, force_refresh: bool = False) -> dict[str, object]:

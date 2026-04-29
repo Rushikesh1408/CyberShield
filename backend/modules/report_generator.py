@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,11 +19,29 @@ class EvidenceReportGenerator:
 
     @staticmethod
     def _incident_id() -> str:
-        return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Unique: microseconds + short uuid (HEAD's safer version)
+        now = datetime.now(timezone.utc)
+        base = now.strftime("%Y%m%dT%H%M%S.%fZ")
+        suffix = uuid.uuid4().hex[:8]
+        return f"{base}-{suffix}"
 
     def generate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        incident_id = str(payload.get("incident_id") or self._incident_id())
+        # Sanitize incident_id: allow only [A-Za-z0-9._-]
+        raw_id = str(payload.get("incident_id") or self._incident_id())
+        safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", raw_id)
+        if not safe_id:
+            safe_id = self._incident_id()
+
+        incident_id = safe_id
         folder = self.incident_root / f"incident_{incident_id}"
+
+        # Ensure folder is a child of incident_root (path traversal protection)
+        # Path.is_relative_to() is immune to the startswith("/tmp/abc" vs "/tmp/abcdef") false-positive.
+        folder_resolved = folder.resolve()
+        root_resolved = self.incident_root.resolve()
+        if not folder_resolved.is_relative_to(root_resolved):
+            raise ValueError("Invalid incident_id: path traversal detected")
+
         folder.mkdir(parents=True, exist_ok=True)
 
         report_json = {

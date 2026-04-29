@@ -49,7 +49,12 @@ class PersistenceDetector:
             try:
                 name = self.process_service.safe_name(process).lower()
                 executable = self.process_service.safe_exe(process).lower()
-                cmdline = self.process_service.safe_cmdline(process).lower()
+                # Support both str and list return types from safe_cmdline
+                cmdline_val = self.process_service.safe_cmdline(process)
+                if isinstance(cmdline_val, list):
+                    cmdline = " ".join(str(x) for x in cmdline_val).lower()
+                else:
+                    cmdline = str(cmdline_val).lower()
                 pid = int(process.pid)
             except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
                 continue

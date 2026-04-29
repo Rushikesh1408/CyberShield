@@ -9,6 +9,11 @@ services:
       PORT: 5000
       FLASK_DEBUG: 0
       FLASK_RELOADER: 0
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in environment or .env}
+      API_KEY: ${API_KEY:?API_KEY must be set in environment or .env}
+      POSTGRES_DB: ${POSTGRES_DB:-cybershield}
+      POSTGRES_USER: ${POSTGRES_USER:-cybershield}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in environment or .env}
       CYBERSHIELD_MONITOR_PATHS: ${CYBERSHIELD_MONITOR_PATHS:-/app/protected_folder}
       CYBERSHIELD_COMMAND_CENTER_BASE_URL: ${CYBERSHIELD_COMMAND_CENTER_BASE_URL:-}
       CYBERSHIELD_COMMAND_CENTER_API_KEY: ${CYBERSHIELD_COMMAND_CENTER_API_KEY:-}
@@ -38,10 +43,28 @@ services:
         VITE_API_BASE_URL: /api
     container_name: cybershield-frontend
     depends_on:
-      - backend
+      backend:
+        condition: service_started
     ports:
       - "${CYBERSHIELD_FRONTEND_PORT:-5173}:80"
     restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: cybershield-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cybershield}
+      POSTGRES_USER: ${POSTGRES_USER:-cybershield}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    # Port 5432 is NOT published — DB is only reachable inside Docker network.
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cybershield}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   tunnel:
     image: cloudflare/cloudflared:latest

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -7,9 +8,18 @@ class CorrelationEngine:
     @staticmethod
     def _safe_float(value: object) -> float:
         try:
-            return float(value)
-        except (TypeError, ValueError):
+            result = float(value)
+            return result if math.isfinite(result) else 0.0
+        except (TypeError, ValueError, OverflowError):
             return 0.0
+
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        try:
+            result = int(float(value))
+            return result
+        except (TypeError, ValueError, OverflowError):
+            return default
 
     def correlate(
         self,
@@ -24,6 +34,7 @@ class CorrelationEngine:
             return {"matched": False, "matches": []}
 
         incoming_wallet_set = {wallet.lower() for wallet in (incoming_wallets or []) if wallet}
+
         known_wallet_set = {
             str(item.get("wallet_address") or "").lower()
             for item in (known_wallets or [])
@@ -32,15 +43,33 @@ class CorrelationEngine:
 
         matches: list[dict[str, Any]] = []
         for known in known_signatures:
+            # Compute per-known wallet set — supports both list-of-dicts and list-of-strings
+            per_known_wallets = set(known_wallet_set)
+            wallets_field = known.get("wallets", [])
+            if isinstance(wallets_field, list):
+                for w in wallets_field:
+                    if isinstance(w, dict):
+                        addr = w.get("address") or w.get("wallet_address")
+                        if addr:
+                            per_known_wallets.add(str(addr).lower())
+                    elif isinstance(w, str):
+                        per_known_wallets.add(w.lower())
+            if "wallet_address" in known:
+                addr = known["wallet_address"]
+                if addr is not None:
+                    per_known_wallets.add(str(addr).lower())
+
+            wallet_overlap = bool(incoming_wallet_set.intersection(per_known_wallets))
             score = self._score_signature(incoming_signature, known)
-            wallet_overlap = bool(incoming_wallet_set.intersection(known_wallet_set))
+            occurrences = self._safe_int(known.get("occurrences"))
+
             if score >= similarity_threshold or wallet_overlap:
                 matches.append(
                     {
                         "signature_id": str(known.get("signature_id") or ""),
                         "similarity": round(score * 100.0, 2),
                         "wallet_overlap": wallet_overlap,
-                        "occurrences": int(known.get("occurrences") or 0),
+                        "occurrences": occurrences,
                     }
                 )
 

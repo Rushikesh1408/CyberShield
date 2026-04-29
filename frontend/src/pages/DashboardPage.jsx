@@ -13,7 +13,9 @@ import StatusCard from '../components/StatusCard';
 import SystemTimelinePanel from '../components/SystemTimelinePanel';
 import InterventionPanel from '../components/InterventionPanel';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
+// API key is required — never falls back to a hardcoded value in production
+const API_KEY = import.meta.env.VITE_API_KEY ?? '';
 
 function joinApiUrl(path) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -93,6 +95,11 @@ function timeLabel(timestamp) {
   });
 }
 
+/**
+ * Fetch JSON from the API.
+ * Automatically attaches x-api-key header on every request.
+ * The backend returns {status, data, error} — this helper unwraps `data`.
+ */
 function buildActivitySample(metrics, {
   snapshot,
   attackSummary,
@@ -145,12 +152,17 @@ function buildActivitySample(metrics, {
   };
 }
 
+
 async function fetchJson(path, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   const method = (options.method ?? 'GET').toUpperCase();
   const headers = { ...(options.headers ?? {}) };
+
+  // Always include API key
+  headers['x-api-key'] = API_KEY;
+
   if (method !== 'GET' && method !== 'HEAD' && options.body !== undefined) {
     headers['Content-Type'] = headers['Content-Type'] ?? 'application/json';
   }
@@ -164,19 +176,23 @@ async function fetchJson(path, options = {}, timeoutMs = 8000) {
   window.clearTimeout(timeoutId);
 
   if (!response.ok) {
-    let message = `Request failed: ${response.status}`;
+    let errorMsg = `Request failed: ${response.status}`;
     try {
       const payload = await response.json();
-      if (payload && typeof payload.message === 'string' && payload.message.trim()) {
-        message = payload.message;
-      }
+      errorMsg = payload.detail ?? payload.message ?? errorMsg;
     } catch {
-      // Keep default error text when backend response is not JSON.
+      // ignore JSON parse failure
     }
-    throw new Error(message);
+    throw new Error(String(errorMsg));
   }
 
-  return response.json();
+  const json = await response.json();
+  // Unwrap standardised envelope {status, data, error}
+  if (json && typeof json === 'object' && 'data' in json && json.status === 'success') {
+    return json.data;
+  }
+  // Legacy / non-standard response — return as-is
+  return json;
 }
 
 export default function DashboardPage() {
@@ -464,7 +480,7 @@ export default function DashboardPage() {
     };
   }, []);
 
-  const isUnderAttack = snapshot.status === 'UNDER_ATTACK';
+  const isUnderAttack = snapshot.status === 'THREAT' || snapshot.status === 'UNDER_ATTACK';
   const toNumericValue = (value) => {
     const numericValue = Number(value);
     return Number.isNaN(numericValue) ? 0 : numericValue;
@@ -614,9 +630,7 @@ export default function DashboardPage() {
   const handleStart = async () => {
     setBusy(true);
     try {
-      await fetchJson('/api/start', {
-        method: 'POST',
-      }, 20000);
+      await fetchJson('/api/start', { method: 'POST' }, 20000);
       await loadSnapshot();
     } catch (requestError) {
       setError(requestError.message);
@@ -719,7 +733,7 @@ export default function DashboardPage() {
     setIsRunningBackup(true);
     try {
       const response = await fetchJson('/api/backup/run', { method: 'POST' });
-      setBackupMessage(`Versioned snapshot completed. Created versions: ${response.created ?? 0}`);
+      setBackupMessage(`Backup completed. Created: ${response.created ?? 0} snapshot(s).`);
       await loadSnapshot();
       await loadBackupStatus();
       await loadSystemIntelligence();
@@ -733,7 +747,7 @@ export default function DashboardPage() {
   const handleRecoverFile = async (filePath) => {
     setIsRecovering(true);
     try {
-      await fetchJson('/api/backup/recover', {
+      await fetchJson('/api/recover', {
         method: 'POST',
         body: JSON.stringify({ file_path: filePath }),
       });
@@ -779,6 +793,7 @@ export default function DashboardPage() {
       const response = await fetch(joinApiUrl('/api/report/download'), {
         method: 'GET',
         signal: controller.signal,
+        headers: { 'x-api-key': API_KEY },
       });
       window.clearTimeout(timeoutId);
 
@@ -786,7 +801,7 @@ export default function DashboardPage() {
         let message = `Request failed: ${response.status}`;
         try {
           const payload = await response.json();
-          message = payload.message ? String(payload.message) : message;
+          message = payload.detail ?? payload.message ?? message;
         } catch {
           // Ignore JSON parsing errors for non-JSON responses.
         }
@@ -825,7 +840,7 @@ export default function DashboardPage() {
                 CyberShield
               </div>
               <h1 className="mt-5 max-w-3xl text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-                CyberShield - Ransomware Defense System
+                Real-Time Ransomware Defense System
               </h1>
               <p className="mt-4 max-w-2xl text-base leading-7 text-slate-300">
                 Early Threat Detection, Active Threat Neutralization, Versioned Snapshot System,
@@ -853,7 +868,7 @@ export default function DashboardPage() {
               <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                 <StatusCard
                   title="File Rate"
-                  value={`${snapshot.metrics.files_per_second.toFixed(1)} /s`}
+                  value={`${(snapshot.metrics.files_per_second ?? 0).toFixed(1)} /s`}
                   caption="Rolling files per second"
                   accent="blue"
                 />
@@ -865,7 +880,7 @@ export default function DashboardPage() {
                 />
                 <StatusCard
                   title="Modifications"
-                  value={snapshot.metrics.modifications}
+                  value={snapshot.metrics.modifications ?? 0}
                   caption="Recent file write count"
                   accent="amber"
                 />
@@ -898,6 +913,7 @@ export default function DashboardPage() {
               <div className="mt-4 grid grid-cols-2 gap-3">
                 <button
                   type="button"
+                  id="btn-start-monitoring"
                   disabled={busy || isSimulating}
                   onClick={handleStart}
                   className="rounded-2xl bg-sky-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
@@ -906,6 +922,7 @@ export default function DashboardPage() {
                 </button>
                 <button
                   type="button"
+                  id="btn-stop-monitoring"
                   disabled={busy || isSimulating}
                   onClick={handleStop}
                   className="rounded-2xl border border-slate-700 bg-slate-950/70 px-4 py-3 text-sm font-semibold text-white transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-60"

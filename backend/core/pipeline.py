@@ -4,14 +4,25 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
+import os
+import logging
 
 from .backup import VersionedSnapshotManager
 from .dna import DigitalDNAStore, compare_dna
 from .entropy import calculate_entropy
-from .monitor import RealTimeMonitor, default_monitor_paths
+from .monitor import RealTimeMonitor, default_monitor_paths, FileMonitor
 from .network_isolation import isolate_network
 from .restore import RestoreManager
 from .scoring import calculate_threat_score
+
+logger = logging.getLogger("cybershield.pipeline")
+
+# broadcast_event is now provided by core/sync.py (lighter, no DB coupling)
+try:
+    from backend.core.sync import broadcast_event
+except ImportError:
+    def broadcast_event(event_type: str, data: dict) -> None:
+        logger.debug(f"[Pipeline] broadcast_event stub: {event_type}")
 
 
 class CyberShieldPipeline:
@@ -66,11 +77,25 @@ class CyberShieldPipeline:
         self._isolation_active = False
         self._last_assessment: dict[str, Any] | None = None
 
+        # Legacy stats dict for backward compatibility
+        self.stats = {
+            "files_per_second": 0,
+            "modifications": 0,
+            "accesses": 0,
+            "status": "SAFE",
+            "alerts_processed": 0,
+        }
+        self.is_running = False
+
     def start(self) -> bool:
-        return self.monitor.start()
+        result = self.monitor.start()
+        self.is_running = self.monitor.is_running
+        return result
 
     def stop(self) -> bool:
-        return self.monitor.stop()
+        result = self.monitor.stop()
+        self.is_running = self.monitor.is_running
+        return result
 
     def register_file(self, source_path: str | Path, *, snapshot: bool = True) -> dict[str, Any]:
         path = Path(source_path).resolve()
@@ -200,6 +225,16 @@ class CyberShieldPipeline:
             self._last_assessment = dict(assessment)
         return assessment
 
+    def process(self, event: dict) -> dict:
+        """Process a single file-system event through the full pipeline (legacy support).
+
+        Increments stats, routes the event, then returns the real threat assessment
+        so callers can react to the result rather than always receiving False.
+        """
+        self.stats["modifications"] += 1
+        self._on_monitor_event(event)
+        return self.assess_threat(respond=False)
+
     def status(self) -> dict[str, Any]:
         monitor_snapshot = self.monitor.snapshot()
         threat = self.assess_threat(respond=False)
@@ -209,11 +244,18 @@ class CyberShieldPipeline:
 
         return {
             "is_running": bool(monitor_snapshot["is_running"]),
+            "is_monitoring": bool(monitor_snapshot["is_running"]),
             "watch_paths": [str(path) for path in self.watch_paths],
             "backup": backup,
             "threat": threat,
             "last_assessment": last_assessment,
             "network_mode": self.network_mode,
+            # Legacy compat fields
+            "status": threat.get("status", "SAFE"),
+            "files_per_second": self.stats.get("files_per_second", 0),
+            "modifications": self.stats.get("modifications", 0),
+            "accesses": self.stats.get("accesses", 0),
+            "alerts_processed": self.stats.get("alerts_processed", 0),
         }
 
     def run_cycle(self) -> dict[str, Any]:
@@ -391,7 +433,7 @@ class CyberShieldPipeline:
 
     def _on_monitor_event(self, payload: dict[str, Any]) -> None:
         action = str(payload.get("action") or "").lower()
-        file_value = str(payload.get("file") or "").strip()
+        file_value = str(payload.get("file") or payload.get("file_path") or "").strip()
         if action not in {"created", "modified", "deleted"} or not file_value:
             return
 
@@ -427,7 +469,6 @@ class CyberShieldPipeline:
         try:
             self.snapshot_manager.create_snapshot(path, force=force_snapshot)
         except (PermissionError, OSError):
-            # File locks are expected during active incidents; keep monitor thread alive.
             return
 
         if self.on_monitor_event is None:
@@ -436,5 +477,4 @@ class CyberShieldPipeline:
         try:
             self.on_monitor_event(payload)
         except (RuntimeError, ValueError, TypeError, OSError):
-            # Honeytrap/action hooks must never break core monitoring.
             return

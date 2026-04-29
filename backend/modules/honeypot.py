@@ -29,6 +29,7 @@ class HoneypotManager:
                 try:
                     if not file_path.exists():
                         file_path.write_text(content, encoding="utf-8")
+                    # Always track as created/seeded (HEAD behaviour - more inclusive)
                     created.add(str(file_path.resolve()).lower())
                 except OSError:
                     continue

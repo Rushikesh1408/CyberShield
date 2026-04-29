@@ -29,7 +29,14 @@ class TimelineEngine:
         }
 
         if self._entries and self._entries[-1]["state"] == entry["state"]:
-            self._entries[-1] = entry
+            # HEAD: merge consecutive same-state entries for richer context
+            prev = self._entries[-1]
+            prev["occurrences"] = prev.get("occurrences", 1) + 1
+            prev["details"] = f"{prev.get('details', '')} | {entry.get('details', '')}"
+            prev["last_seen"] = entry["timestamp"]
+            if entry["severity"] != prev.get("severity"):
+                prev["severity"] = entry["severity"]
+            prev["title"] = entry["title"]
         else:
             self._entries.append(entry)
 
