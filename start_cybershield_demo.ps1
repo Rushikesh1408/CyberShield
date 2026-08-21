@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$BACKEND_PORT = 5000
+$BACKEND_PORT = 5001
 $FRONTEND_PORT = 5173
 $SOCKET_API_KEY = "CYBERSHIELD_SECURE_KEY"
 
@@ -229,7 +229,8 @@ $frontendCommand = @"
 Set-Location '$FrontendRoot'
 `$env:VITE_CYBERSHIELD_SOCKET_URL = 'http://${LOCAL_IP}:$BACKEND_PORT'
 `$env:VITE_CYBERSHIELD_SOCKET_API_KEY = '$SOCKET_API_KEY'
-npm run dev -- --host 0.0.0.0 --port $FRONTEND_PORT
+`$env:VITE_API_BASE_URL = 'http://${LOCAL_IP}:$BACKEND_PORT'
+cmd /c npm run dev -- --host 0.0.0.0 --port $FRONTEND_PORT
 "@
 
 try {

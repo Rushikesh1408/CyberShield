@@ -109,8 +109,8 @@ function buildActivitySample(metrics, {
   if (!isUnderAttack) {
     return {
       label: timeLabel(new Date().toISOString()),
-      activity_signal: metricSignal,
-      files_per_second: filesPerSecond,
+      activity_signal: 0,
+      files_per_second: 0,
     };
   }
 
@@ -369,6 +369,11 @@ export default function DashboardPage() {
           isSimulating,
         });
         setHistory((currentHistory) => {
+          if (!isSimulating && String(nextSnapshot.status ?? '').toUpperCase() !== 'UNDER_ATTACK') {
+            // Reset idle chart to zero so prior attack spikes do not linger visually.
+            return [liveSample];
+          }
+
           if (currentHistory.length === 0 && graphHistory.length > 0) {
             // Seed chart from backend history once, then rely on live polling samples.
             return [...graphHistory.slice(-119), liveSample];
