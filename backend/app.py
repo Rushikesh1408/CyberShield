@@ -42,6 +42,8 @@ def create_app() -> Flask:
     flask_app = Flask(__name__)
     config = AppConfig.from_env()
     flask_app.config.from_mapping(config.flask_mapping())
+    from flask_cors import CORS
+    CORS(flask_app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
     register_routes(flask_app)
     init_socketio(flask_app)
     return flask_app
@@ -58,4 +60,5 @@ if __name__ == "__main__":
         port=runtime_config.port,
         debug=runtime_config.debug,
         use_reloader=runtime_config.use_reloader,
+        allow_unsafe_werkzeug=True,
     )

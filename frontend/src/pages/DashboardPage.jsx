@@ -13,7 +13,7 @@ import StatusCard from '../components/StatusCard';
 import SystemTimelinePanel from '../components/SystemTimelinePanel';
 import InterventionPanel from '../components/InterventionPanel';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5000';
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:5001';
 
 function joinApiUrl(path) {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -369,11 +369,6 @@ export default function DashboardPage() {
           isSimulating,
         });
         setHistory((currentHistory) => {
-          if (!isSimulating && String(nextSnapshot.status ?? '').toUpperCase() !== 'UNDER_ATTACK') {
-            // Reset idle chart to zero so prior attack spikes do not linger visually.
-            return [liveSample];
-          }
-
           if (currentHistory.length === 0 && graphHistory.length > 0) {
             // Seed chart from backend history once, then rely on live polling samples.
             return [...graphHistory.slice(-119), liveSample];

@@ -148,26 +148,25 @@ class RealTimeMonitor:
         timestamp = time.time()
         event = MonitorEvent(file=str(Path(path)), action=action, timestamp=timestamp)
         with self._lock:
-            self._event_counter += 1
-            self._event_times.append(timestamp)
             self._recent_events.append(event)
+            self._event_times.append(timestamp)
+            self._event_counter += 1
 
         with GLOBAL_EVENT_COUNTER_LOCK:
             GLOBAL_EVENT_COUNTER["value"] += 1
 
-        if self.on_event is None:
-            return
-
-        payload = {
-            "file": event.file,
-            "action": event.action,
-            "timestamp": event.timestamp,
-        }
-        try:
-            self.on_event(payload)
-        except (RuntimeError, ValueError, TypeError):
-            # Callback errors should not stop monitoring.
-            return
+        if self.on_event is not None:
+            try:
+                self.on_event(
+                    {
+                        "file": event.file,
+                        "action": event.action,
+                        "timestamp": event.timestamp,
+                    }
+                )
+            except (RuntimeError, ValueError, TypeError, OSError):
+                # Callback errors should not stop monitoring.
+                pass
 
     def _sampling_loop(self) -> None:
         while not self._stop_event.wait(1.0):

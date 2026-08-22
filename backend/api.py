@@ -88,7 +88,7 @@ SOCKET_API_KEY_ENV = "CYBERSHIELD_SOCKET_API_KEY"
 DEFAULT_SOCKET_API_KEY = "CYBERSHIELD_SECURE_KEY"
 SOCKET_EVENT_NAME = "cybershield_event"
 
-socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
+socketio = SocketIO(cors_allowed_origins="*")
 _socket_health_lock = threading.Lock()
 _connected_clients = 0
 _last_event_timestamp = time.time()
@@ -1305,8 +1305,8 @@ class SystemController:
                         "event": "attack_detected",
                         "event_type": "critical",
                         "action": "flagged",
-                        "file_name": Path(source_path).name if source_path else "",
-                        "file_path": source_path,
+                        "file_name": Path(assessment.get("source_path", "")).name if assessment.get("source_path") else "",
+                        "file_path": assessment.get("source_path", ""),
                         "cpu_usage": cpu_usage,
                         "file_rate": files_per_second,
                         "score": score,
@@ -1314,9 +1314,9 @@ class SystemController:
                         "modifications": activity_count,
                         "accesses": activity_count,
                         "dna_mismatch_count": dna_mismatch_count,
-                        "process_name": process_name,
-                        "process_path": process_path,
-                        "process_pid": process_pid,
+                        "process_name": assessment.get("process_name", ""),
+                        "process_path": assessment.get("process_path", ""),
+                        "process_pid": assessment.get("process_pid", 0),
                         "paths": [str(path) for path in self.protected_directories],
                     }
                 )
@@ -1325,9 +1325,9 @@ class SystemController:
                     {
                         "confidence": int(score),
                         "files_affected": int(activity_count),
-                        "source": source_path or self._dominant_activity_extension(),
-                        "process_name": process_name,
-                        "process_pid": process_pid,
+                        "source": assessment.get("source_path", "") or self._dominant_activity_extension(),
+                        "process_name": assessment.get("process_name", ""),
+                        "process_pid": assessment.get("process_pid", 0),
                         "cpu_usage": round(cpu_usage, 2),
                         "file_rate": round(files_per_second, 2),
                     },

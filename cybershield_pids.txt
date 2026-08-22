@@ -1,5 +1,5 @@
 backend_port=5001
 frontend_port=5173
-local_ip=192.168.16.56
-backend_shell_pid=5888
-frontend_shell_pid=3568
+local_ip=192.168.137.1
+backend_shell_pid=17944
+frontend_shell_pid=20660
