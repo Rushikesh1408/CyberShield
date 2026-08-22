@@ -52,7 +52,7 @@ def get_database_url() -> str:
             "Set DATABASE_URL or OFFLINE_MODE=1 to use SQLite."
         )
 
-    # Default: SQLite so the app always starts in local dev without Postgres
+    # Default: SQLite so the app always starts in local dev without Postgresssssssssssssssssssssss
     logger.warning(
         "POSTGRES_USER/POSTGRES_PASSWORD not set — falling back to SQLite. "
         "Set REQUIRE_POSTGRES=1 to fail fast in production."
